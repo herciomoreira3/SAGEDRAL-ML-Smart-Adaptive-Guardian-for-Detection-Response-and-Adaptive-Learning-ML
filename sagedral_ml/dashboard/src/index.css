@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-950 text-slate-100 font-sans;
+  }
+}
+
+.glass-card {
+  @apply bg-slate-900/80 backdrop-blur-md border border-slate-800 rounded-xl shadow-xl;
+}
