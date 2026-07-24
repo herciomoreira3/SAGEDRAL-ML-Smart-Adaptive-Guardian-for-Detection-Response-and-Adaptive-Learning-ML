@@ -35,3 +35,10 @@ def test_config_validation():
     cfg = Config(bad_data)
     errors = cfg.validate()
     assert len(errors) >= 3
+
+
+def test_section_get():
+    config = Config({"feature_extraction": {"flow_timeout": 60}})
+    assert isinstance(config.get("feature_extraction"), dict)
+    assert config.get("feature_extraction", {}) == {"flow_timeout": 60}
+    assert config.get("non_existent", {}) == {}

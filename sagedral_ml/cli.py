@@ -2,6 +2,7 @@
 Click CLI Command Line Interface for SAGEDRAL-ML tool.
 """
 
+import sagedral_ml
 import os
 import sys
 import json

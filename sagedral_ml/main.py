@@ -4,6 +4,7 @@ Coordinates CaptureThread, ProcessingThread (FlowExtractor + Signature + ML + De
 and FastAPI Uvicorn ASGI server with clean multi-thread shutdown handling.
 """
 
+import sagedral_ml
 import sys
 import time
 import queue

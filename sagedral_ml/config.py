@@ -152,8 +152,15 @@ class Config:
     def data(self) -> Dict[str, Any]:
         return self._data
 
-    def get(self, section: str, key: str, default: Any = None) -> Any:
-        return self._data.get(section, {}).get(key, default)
+    def get(self, section: str, key: Any = None, default: Any = None) -> Any:
+        if key is None:
+            return self._data.get(section, {})
+        if not isinstance(key, str):
+            return self._data.get(section, key)
+        sec_data = self._data.get(section, {})
+        if isinstance(sec_data, dict):
+            return sec_data.get(key, default)
+        return default
 
     def to_dict(self) -> Dict[str, Any]:
         return self._data

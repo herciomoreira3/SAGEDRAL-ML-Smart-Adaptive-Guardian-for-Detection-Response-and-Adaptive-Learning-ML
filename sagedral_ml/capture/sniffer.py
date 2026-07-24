@@ -2,6 +2,7 @@
 PacketCapture class for non-blocking real-time packet sniffing using Scapy.
 """
 
+import sagedral_ml
 import queue
 import threading
 import logging

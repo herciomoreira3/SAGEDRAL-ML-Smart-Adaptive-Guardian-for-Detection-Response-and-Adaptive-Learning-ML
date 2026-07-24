@@ -67,9 +67,15 @@ User=root
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable sagedral-ml
-info "Systemd service installed and enabled."
+if [ -d /run/systemd/system ] && systemctl is-system-running &>/dev/null; then
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable sagedral-ml 2>/dev/null || true
+    info "Systemd service installed and enabled."
+else
+    warn "System is not booted with systemd as PID 1 (WSL environment detected)."
+    warn "Service file created at /etc/systemd/system/sagedral-ml.service"
+    info "To start SAGEDRAL-ML manually in WSL, run: sudo sagedral-ml start"
+fi
 
 echo ""
 echo -e "${GREEN}================================================${NC}"
