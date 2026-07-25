@@ -27,7 +27,10 @@ DEFAULT_CONFIG_DICT: Dict[str, Any] = {
         "data_dir": "/var/lib/sagedral-ml",
     },
     "capture": {
-        "interface": "eth0",
+        "interface": "",                        # KOSONG = auto-detect (recommended).
+                                                # Auto-select prefer bridged / physical non-NAT
+                                                # interface (penalize 10.0.2.0/24 VirtualBox NAT).
+                                                # Isi manual: misal "eth1", "wlan0", "enp0s8" etc.
         "bpf_filter": "",
         "promiscuous": True,
         "queue_maxsize": 10000,
@@ -90,7 +93,11 @@ log_file = "/var/log/sagedral-ml.log"
 data_dir = "/var/lib/sagedral-ml"
 
 [capture]
-interface = "eth0"                      # WAJIB: Network interface to capture
+interface = ""                          # "" = auto-detect interface (RECOMMENDED).
+                                        # Auto-detect heuristic: choose non-10.0.2.0/24
+                                        # (skips VirtualBox NAT eth0 10.0.2.15) so it
+                                        # prefers eth1 / enp0s8 (Bridged).
+                                        # Override manual: "eth1", "wlan0", "enp0s8" etc.
 bpf_filter = ""                         # BPF filter string (e.g., "tcp port 80 or udp")
 promiscuous = true
 queue_maxsize = 10000

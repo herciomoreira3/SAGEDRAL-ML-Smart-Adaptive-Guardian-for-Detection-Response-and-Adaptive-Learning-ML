@@ -15,6 +15,42 @@ logger = logging.getLogger("sagedral_ml.ips.response")
 HARDCODED_WHITELIST: Set[str] = {"127.0.0.1", "::1"}
 
 
+def get_local_ip_addresses() -> Set[str]:
+    """Enumerate all local IPv4/IPv6 addresses assigned to ANY interface on the
+    running host (lo, eth0 NAT, eth1 bridged, wifi0, docker0, etc.) and return
+    as a set of validated IP strings.
+
+    Purpose: prevents SAGEDRAL-ML from auto-blocking its OWN host IP addresses
+    when the user accidentally points capture.interface to an internal/NAT
+    interface and sees legitimate self-traffic (ssh, dashboard HTTP, apt)
+    classified as anomaly DDoS.
+    """
+    found: Set[str] = set()
+    try:
+        res = subprocess.run(
+            ["ip", "-o", "addr", "show"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except Exception as e:
+        logger.debug(f"Could not list local IPs: {e}")
+        return found
+    ipv4_re = re.compile(r"\binet\s+([0-9]{1,3}(?:\.[0-9]{1,3}){3})")
+    ipv6_re = re.compile(r"\binet6\s+([0-9a-fA-F:]+)")
+    for line in res.stdout.splitlines():
+        for m in ipv4_re.finditer(line):
+            try:
+                found.add(str(ipaddress.IPv4Address(m.group(1))))
+            except ValueError:
+                pass
+        for m in ipv6_re.finditer(line):
+            tok = m.group(1).split("/", 1)[0]
+            try:
+                found.add(str(ipaddress.IPv6Address(tok)))
+            except ValueError:
+                pass
+    return found
+
+
 def validate_ip(ip: str) -> str:
     """
     Validate and sanitize IP address string.
@@ -61,6 +97,11 @@ class IPSModule:
         self.auto_unblock_after = auto_unblock_after
         self.custom_whitelist: Set[str] = set(whitelist or [])
         self.gateway_ip: Optional[str] = get_default_gateway()
+        # Auto-whitelist EVERY IPv4/IPv6 that is assigned to this host itself so
+        # we never classify legitimate ingress/egress self-traffic (e.g. user
+        # SSH-ing into VM or hitting dashboard from within VM, capture on wrong
+        # interface) as an attack and auto-block our own IPs.
+        self.local_ips: Set[str] = get_local_ip_addresses()
 
         self.backend = self._determine_backend()
 
@@ -89,6 +130,8 @@ class IPSModule:
         if clean_ip in self.custom_whitelist:
             return True
         if self.gateway_ip and clean_ip == self.gateway_ip:
+            return True
+        if clean_ip in self.local_ips:
             return True
         return False
 

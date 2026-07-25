@@ -26,6 +26,10 @@ import signal
 import threading
 import logging
 import asyncio
+import ipaddress
+import re
+import subprocess
+from typing import List, Optional
 import uvicorn
 
 from sagedral_ml.config import get_config
@@ -45,6 +49,89 @@ from sagedral_ml.api.routers import blocked_ips, model as model_router
 logger = logging.getLogger("sagedral_ml.main")
 
 stop_event = threading.Event()
+
+
+def _auto_detect_capture_interface(explicit: Optional[str]) -> str:
+    """Select the best default capture interface when user does not explicitly
+    override capture.interface in config.toml.
+
+    Heuristic (highest priority first):
+      1. Explicit value from config — if operstate exists and is up/unknown.
+      2. Any UP non-loopback interface whose IP is NOT on 10.0.2.0/24
+         (the canonical VirtualBox NAT subnet) — this picks eth1/enp0s8
+         Bridged interfaces over eth0 (10.0.2.15 NAT).
+      3. Any UP, non-loopback, non-pointopoint interface with a global IPv4.
+      4. Absolute last-resort fallback: "eth0".
+    """
+    if explicit:
+        try:
+            with open("/sys/class/net/" + explicit + "/operstate") as f:
+                state = f.read().strip()
+            if state in ("up", "unknown"):
+                return explicit
+            logger.warning(
+                f"Explicit capture interface '{explicit}' operstate={state}; "
+                "trying auto-detect instead."
+            )
+        except FileNotFoundError:
+            logger.warning(
+                f"Explicit capture interface '{explicit}' not in /sys/class/net; "
+                "auto-detecting."
+            )
+
+    candidates: List[tuple] = []  # (prio, name)
+    try:
+        res = subprocess.run(
+            ["ip", "-o", "-4", "addr", "show"],
+            capture_output=True, text=True, timeout=3,
+        )
+        for line in res.stdout.splitlines():
+            toks = line.split()
+            if len(toks) < 4:
+                continue
+            iface = toks[1].split("@", 1)[0]
+            cidr = toks[3]
+            ip_part = cidr.split("/", 1)[0]
+            try:
+                addr = ipaddress.IPv4Address(ip_part)
+            except ValueError:
+                continue
+            if addr.is_loopback or addr.is_link_local:
+                continue
+            flags_path = f"/sys/class/net/{iface}/flags"
+            iface_flags = 0
+            try:
+                with open(flags_path) as f:
+                    iface_flags = int(f.read().strip(), 16)
+            except Exception:
+                pass
+            # IFF_LOOPBACK=0x8 / IFF_POINTOPOINT=0x10 — skip these.
+            skip_mask = 0x8 | 0x10
+            if iface_flags & skip_mask:
+                continue
+            prio = 0
+            # Penalize VirtualBox NAT subnet heavily.
+            if addr in ipaddress.IPv4Network("10.0.2.0/24"):
+                prio -= 100
+            # Penalize container bridges.
+            if iface.startswith(("docker", "veth", "br-", "virbr", "vnet", "lxc")):
+                prio -= 50
+            # Prefer classic bridged / physical naming conventions.
+            if re.match(r"^(eth[1-9]|enp0s[8-9]|ens[0-9]+|wlan[0-9]+|wl[a-z0-9]+)$", iface):
+                prio += 10
+            if not addr.is_private:
+                prio += 20
+            candidates.append((prio, iface))
+    except Exception as e:
+        logger.debug(f"Could not enumerate interfaces for capture auto-detect: {e}")
+
+    if candidates:
+        candidates.sort(key=lambda x: (-x[0], x[1]))
+        best = candidates[0][1]
+        logger.info(f"Auto-detected capture interface: '{best}' (candidates: {candidates})")
+        return best
+    logger.warning("No valid capture interface found via auto-detect; falling back to 'eth0'.")
+    return "eth0"
 
 
 def processing_worker(
@@ -232,7 +319,9 @@ def run_app(enable_capture: bool = True):
     # Capture Component
     sniffer = None
     if enable_capture:
-        interface = config.get("capture", "interface", "eth0")
+        explicit_iface = config.get("capture", "interface", None)
+        interface = _auto_detect_capture_interface(explicit_iface)
+        logger.info(f"Starting packet capture on interface '{interface}' (explicit={explicit_iface!r})")
         sniffer = PacketCapture(
             interface=interface,
             packet_queue=packet_queue,
