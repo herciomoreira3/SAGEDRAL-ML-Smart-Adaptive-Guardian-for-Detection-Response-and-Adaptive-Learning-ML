@@ -6,6 +6,20 @@ and FastAPI Uvicorn ASGI server with clean multi-thread shutdown handling.
 
 import sagedral_ml
 import sys
+import warnings
+# === FIX NUMPY WSL longdouble warning (cosmetic only; TIDAK PENGARUH detection) ===
+# WSL build numpy kadang compiled tanpa extended precision longdouble.
+# SAGEDRAL HANYA menggunakan float64/int32; longdouble TIDAK PERNAH dipakai.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*longdouble.*Signature.*does not match any known type.*",
+    category=UserWarning,
+    module=r"numpy\._core\.getlimits",
+)
+try:
+    import numpy as _np_warn_hack  # noqa: F401 — trigger numpy init sekarang
+except Exception:
+    pass
 import time
 import queue
 import signal

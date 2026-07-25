@@ -26,9 +26,9 @@ fi
 
 # 3. Install Python dependencies and package
 info "Installing dependencies from requirements.txt..."
-pip install -r requirements.txt
-info "Installing sagedral-ml Python package..."
-pip install .
+pip3 install -r requirements.txt
+info "Installing sagedral-ml Python package (source with ML fallback fixes)..."
+pip3 install .
 
 # 4. Create directories
 info "Creating directories..."
@@ -49,7 +49,15 @@ nft add set inet sagedral blocklist "{ type ipv4_addr; }" 2>/dev/null || true
 nft add chain inet sagedral input "{ type filter hook input priority 0; }" 2>/dev/null || true
 nft add rule inet sagedral input ip saddr @blocklist drop 2>/dev/null || true
 
-# 7. Install systemd service
+# 7. ML Model initialization (CRITICAL FIX: generates fallback models so ML Model Loaded = True on first start)
+info "Initializing ML detection models..."
+if sagedral-ml model init; then
+    info "ML models initialized successfully."
+else
+    warn "ML model init returned non-zero. Service will generate fallbacks on first startup."
+fi
+
+# 8. Install systemd service
 info "Installing systemd service..."
 cat > /etc/systemd/system/sagedral-ml.service << 'EOF'
 [Unit]
@@ -71,15 +79,33 @@ if [ -d /run/systemd/system ] && systemctl is-system-running &>/dev/null; then
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable sagedral-ml 2>/dev/null || true
     info "Systemd service installed and enabled."
+    info "Starting SAGEDRAL-ML service..."
+    systemctl start sagedral-ml 2>/dev/null || warn "Could not auto-start service. Start manually: systemctl start sagedral-ml"
 else
     warn "System is not booted with systemd as PID 1 (WSL environment detected)."
     warn "Service file created at /etc/systemd/system/sagedral-ml.service"
     info "To start SAGEDRAL-ML manually in WSL, run: sudo sagedral-ml start"
 fi
 
+# 9. Post-install status check
+echo ""
+info "Post-install status check..."
+sleep 2
+if command -v sagedral-ml &>/dev/null; then
+    # Pre-flight offline model check (doesn't require running service)
+    echo ""
+    echo "=== ML Model Status (offline check) ==="
+    sagedral-ml model info 2>&1 || true
+    echo ""
+fi
+
 echo ""
 echo -e "${GREEN}================================================${NC}"
 echo -e "${GREEN}  SAGEDRAL-ML installation completed!${NC}"
 echo -e "${GREEN}================================================${NC}"
-echo "Start service: systemctl start sagedral-ml"
-echo "Web Dashboard: http://localhost:8000"
+echo "Start service : systemctl start sagedral-ml"
+echo "                (or WSL: sudo sagedral-ml start)"
+echo "Check status  : sagedral-ml status          -> ML Model Loaded should now be True"
+echo "Model details : sagedral-ml model info"
+echo "Re-init model : sagedral-ml model init --force"
+echo "Web Dashboard : http://localhost:8000"
