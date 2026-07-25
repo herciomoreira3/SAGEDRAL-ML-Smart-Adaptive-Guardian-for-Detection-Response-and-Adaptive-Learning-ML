@@ -8,6 +8,7 @@ import threading
 import logging
 from typing import Dict, Tuple, Optional
 from scapy.layers.inet import IP, TCP, UDP, ICMP
+from scapy.layers.inet6 import IPv6
 from scapy.packet import Packet
 
 from sagedral_ml.features.models import FlowRecord
@@ -25,6 +26,7 @@ class FlowAggregator:
         config = config or {}
         self.flow_timeout: float = float(config.get("flow_timeout", 60))
         self.max_packets_per_flow: int = int(config.get("max_packets_per_flow", 1000))
+        self.max_active_flows: int = int(config.get("max_active_flows", 50000))
         self.active_flows: Dict[Tuple[str, str, int, int, int], FlowRecord] = {}
         self._lock = threading.Lock()
 
@@ -36,10 +38,18 @@ class FlowAggregator:
         if not hasattr(packet, "haslayer"):
             return None
 
-        if not packet.haslayer(IP):
+        is_ipv6 = packet.haslayer(IPv6)
+        if packet.haslayer(IP):
+            ip_layer = packet[IP]
+            protocol = int(ip_layer.proto)
+            header_len = int(ip_layer.ihl * 4) if hasattr(ip_layer, "ihl") else 20
+        elif is_ipv6:
+            ip_layer = packet[IPv6]
+            protocol = int(getattr(ip_layer, "nh", 0))
+            header_len = 40
+        else:
             return None
 
-        ip_layer = packet[IP]
         src_ip = ip_layer.src
         dst_ip = ip_layer.dst
         pkt_len = len(packet)
@@ -47,8 +57,6 @@ class FlowAggregator:
 
         src_port = 0
         dst_port = 0
-        protocol = int(ip_layer.proto)
-        header_len = int(ip_layer.ihl * 4) if hasattr(ip_layer, "ihl") else 20
         flags = {}
 
         if packet.haslayer(TCP):
@@ -103,6 +111,9 @@ class FlowAggregator:
         bwd_key = (dst_ip, src_ip, dst_port, src_port, protocol)
 
         with self._lock:
+            if fwd_key not in self.active_flows and bwd_key not in self.active_flows:
+                self._evict_oldest_flows_if_needed()
+
             if fwd_key in self.active_flows:
                 flow = self.active_flows[fwd_key]
                 flow.add_packet(info["pkt_len"], info["header_len"], flags, is_forward=True, timestamp=timestamp)
@@ -138,6 +149,26 @@ class FlowAggregator:
                     self.flow_queue.put_nowait(completed_flow)
                 except queue.Full:
                     logger.warning("flow_queue is full, completed flow dropped.")
+
+    def _evict_oldest_flows_if_needed(self) -> None:
+        """Evict oldest flows when active flow cardinality exceeds safety cap."""
+        if self.max_active_flows <= 0:
+            return
+        if len(self.active_flows) < self.max_active_flows:
+            return
+
+        evict_count = max(1, int(self.max_active_flows * 0.10))
+        sorted_keys = sorted(
+            self.active_flows.keys(),
+            key=lambda k: self.active_flows[k].end_time,
+        )
+        for old_key in sorted_keys[:evict_count]:
+            old_flow = self.active_flows.pop(old_key)
+            try:
+                self.flow_queue.put_nowait(old_flow)
+            except queue.Full:
+                logger.warning("flow_queue is full, evicted flow dropped.")
+                break
 
     def cleanup_timeouts(self, now: Optional[float] = None) -> None:
         """Scan active flows and complete any flow exceeding timeout."""

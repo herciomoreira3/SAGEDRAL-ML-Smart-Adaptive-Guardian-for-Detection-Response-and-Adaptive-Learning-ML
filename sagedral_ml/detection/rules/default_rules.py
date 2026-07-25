@@ -10,10 +10,11 @@ SIGNATURE_RULES: List[Dict[str, Any]] = [
         "name": "SYN Flood",
         "description": "High volume of SYN packets without ACK responses in short duration",
         "severity": "HIGH",
-        "condition": lambda flow: (
-            flow.get("syn_flag_count", 0) > 100 and
-            flow.get("ack_flag_count", 0) < 10 and
-            flow.get("duration", 100) < 5.0
+        "params": {"min_syn_count": 100, "max_ack_count": 10, "max_duration": 5.0},
+        "condition": lambda flow, params: (
+            flow.get("syn_flag_count", 0) > params["min_syn_count"] and
+            flow.get("ack_flag_count", 0) < params["max_ack_count"] and
+            flow.get("duration", 100) < params["max_duration"]
         ),
         "attack_type": "DDoS",
     },
@@ -22,9 +23,10 @@ SIGNATURE_RULES: List[Dict[str, Any]] = [
         "name": "Port Scan (SYN)",
         "description": "SYN packets sent with minimal data exchange",
         "severity": "MEDIUM",
-        "condition": lambda flow: (
-            flow.get("total_fwd_packets", 0) < 3 and
-            flow.get("syn_flag_count", 0) >= 1 and
+        "params": {"max_fwd_packets": 3, "min_syn_count": 1},
+        "condition": lambda flow, params: (
+            flow.get("total_fwd_packets", 0) < params["max_fwd_packets"] and
+            flow.get("syn_flag_count", 0) >= params["min_syn_count"] and
             flow.get("fin_flag_count", 0) == 0 and
             flow.get("total_bwd_packets", 0) == 0
         ),
@@ -35,9 +37,10 @@ SIGNATURE_RULES: List[Dict[str, Any]] = [
         "name": "ICMP Flood",
         "description": "Abnormal volume of ICMP traffic per second",
         "severity": "HIGH",
-        "condition": lambda flow: (
+        "params": {"min_packets_per_sec": 1000},
+        "condition": lambda flow, params: (
             flow.get("protocol", 0) == 1 and
-            flow.get("flow_packets_per_sec", 0) > 1000
+            flow.get("flow_packets_per_sec", 0) > params["min_packets_per_sec"]
         ),
         "attack_type": "DDoS",
     },
@@ -46,8 +49,9 @@ SIGNATURE_RULES: List[Dict[str, Any]] = [
         "name": "Large Outbound Transfer",
         "description": "Very large outbound byte transfer exceeding exfiltration threshold (>100MB)",
         "severity": "MEDIUM",
-        "condition": lambda flow: (
-            flow.get("total_bwd_bytes", 0) > 100_000_000
+        "params": {"min_bwd_bytes": 100_000_000},
+        "condition": lambda flow, params: (
+            flow.get("total_bwd_bytes", 0) > params["min_bwd_bytes"]
         ),
         "attack_type": "Exfiltration",
     },
@@ -56,10 +60,11 @@ SIGNATURE_RULES: List[Dict[str, Any]] = [
         "name": "Brute Force SSH",
         "description": "Repeated connection attempts to SSH port 22 in short duration",
         "severity": "HIGH",
-        "condition": lambda flow: (
-            flow.get("dst_port", 0) == 22 and
-            flow.get("total_fwd_packets", 0) > 50 and
-            flow.get("duration", 100) < 30.0
+        "params": {"dst_port": 22, "min_fwd_packets": 50, "max_duration": 30.0},
+        "condition": lambda flow, params: (
+            flow.get("dst_port", 0) == params["dst_port"] and
+            flow.get("total_fwd_packets", 0) > params["min_fwd_packets"] and
+            flow.get("duration", 100) < params["max_duration"]
         ),
         "attack_type": "BruteForce",
     },
@@ -68,10 +73,11 @@ SIGNATURE_RULES: List[Dict[str, Any]] = [
         "name": "Brute Force RDP",
         "description": "Repeated connection attempts to RDP port 3389",
         "severity": "HIGH",
-        "condition": lambda flow: (
-            flow.get("dst_port", 0) == 3389 and
-            flow.get("total_fwd_packets", 0) > 30 and
-            flow.get("duration", 100) < 60.0
+        "params": {"dst_port": 3389, "min_fwd_packets": 30, "max_duration": 60.0},
+        "condition": lambda flow, params: (
+            flow.get("dst_port", 0) == params["dst_port"] and
+            flow.get("total_fwd_packets", 0) > params["min_fwd_packets"] and
+            flow.get("duration", 100) < params["max_duration"]
         ),
         "attack_type": "BruteForce",
     },
@@ -80,9 +86,10 @@ SIGNATURE_RULES: List[Dict[str, Any]] = [
         "name": "UDP Flood",
         "description": "Extremely high UDP packet throughput per second",
         "severity": "HIGH",
-        "condition": lambda flow: (
+        "params": {"min_packets_per_sec": 5000},
+        "condition": lambda flow, params: (
             flow.get("protocol", 0) == 17 and
-            flow.get("flow_packets_per_sec", 0) > 5000
+            flow.get("flow_packets_per_sec", 0) > params["min_packets_per_sec"]
         ),
         "attack_type": "DDoS",
     },

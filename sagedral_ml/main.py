@@ -44,7 +44,7 @@ import sagedral_ml.database.connection as _db_conn
 from sagedral_ml.database import crud
 from sagedral_ml.api.main import app
 from sagedral_ml.api.websocket import ws_manager
-from sagedral_ml.api.routers import blocked_ips, model as model_router
+from sagedral_ml.core.container import global_container
 
 logger = logging.getLogger("sagedral_ml.main")
 
@@ -260,6 +260,66 @@ def processing_worker(
     logger.info("Processing worker thread exiting.")
 
 
+def capture_thread_worker(
+    interface: str,
+    packet_queue: queue.Queue,
+    bpf_filter: str,
+    promiscuous: bool,
+    stop_event_ref: threading.Event,
+):
+    """Capture thread with auto-recovery watchdog (IMP-CAP-02)."""
+    restart_count = 0
+    sniffer = None
+
+    while not stop_event_ref.is_set():
+        sniffer = PacketCapture(
+            interface=interface,
+            packet_queue=packet_queue,
+            bpf_filter=bpf_filter,
+            promiscuous=promiscuous,
+        )
+        try:
+            sniffer.start()
+            global_container.set_capture_module(sniffer)
+            logger.info(f"Capture thread active on '{interface}' (restart #{restart_count})")
+
+            while not stop_event_ref.is_set() and sniffer.is_running:
+                time.sleep(1)
+                stats = sniffer.get_stats()
+                last_seen = stats.get("last_packet_seen_sec_ago")
+                received = stats.get("packets_received", 0)
+                if (
+                    received > 0
+                    and last_seen is not None
+                    and last_seen > 30
+                ):
+                    logger.warning(
+                        "Capture watchdog: no packets for >30s on interface '%s', restarting capture",
+                        interface,
+                    )
+                    sniffer.stop()
+                    break
+        except Exception as e:
+            restart_count += 1
+            logger.error(
+                "Capture thread crashed (restart #%d), retry in 5s: %s",
+                restart_count,
+                e,
+            )
+        finally:
+            if sniffer is not None and sniffer.is_running:
+                try:
+                    sniffer.stop()
+                except Exception:
+                    pass
+            global_container.set_capture_module(None)
+
+        if not stop_event_ref.is_set():
+            time.sleep(5)
+
+    logger.info("Capture thread exiting.")
+
+
 def run_app(enable_capture: bool = True):
     """Main orchestrator function."""
     config = get_config()
@@ -304,9 +364,24 @@ def run_app(enable_capture: bool = True):
         auto_unblock_after=config.get("ips", "auto_unblock_after", 3600),
     )
 
-    # Inject instances into API routers for endpoints
-    blocked_ips.router.ips_module = ips_module
-    model_router.router.ml_engine = ml_engine
+    global_container.set_config(config)
+    global_container.set_signature_engine(signature_engine)
+    global_container.set_ml_engine(ml_engine)
+    global_container.set_decision_engine(decision_engine)
+    global_container.set_ips_module(ips_module)
+    global_container.set_aggregator(flow_aggregator)
+
+    async def _startup_reconcile():
+        await _db_conn.init_db()
+        async with _db_conn.AsyncSessionLocal() as db:
+            rules_loaded = await signature_engine.load_rules_from_db(db)
+            logger.info("Loaded %d custom signature rule(s) from database.", rules_loaded)
+            await ips_module.reconcile_from_db(db)
+
+    try:
+        asyncio.run(_startup_reconcile())
+    except Exception as e:
+        logger.error(f"Startup reconcile/load-rules failed: {e}")
 
     # Worker Thread
     worker_thread = threading.Thread(
@@ -316,29 +391,33 @@ def run_app(enable_capture: bool = True):
     )
     worker_thread.start()
 
-    # Capture Component
-    sniffer = None
+    # Capture Component (watchdog thread with auto-recovery)
+    capture_thread = None
     if enable_capture:
         explicit_iface = config.get("capture", "interface", None)
         interface = _auto_detect_capture_interface(explicit_iface)
         logger.info(f"Starting packet capture on interface '{interface}' (explicit={explicit_iface!r})")
-        sniffer = PacketCapture(
-            interface=interface,
-            packet_queue=packet_queue,
-            bpf_filter=config.get("capture", "bpf_filter", ""),
-            promiscuous=config.get("capture", "promiscuous", True),
+        capture_thread = threading.Thread(
+            target=capture_thread_worker,
+            args=(
+                interface,
+                packet_queue,
+                config.get("capture", "bpf_filter", ""),
+                config.get("capture", "promiscuous", True),
+                stop_event,
+            ),
+            daemon=True,
+            name="sagedral-capture",
         )
-        try:
-            sniffer.start()
-        except Exception as e:
-            logger.error(f"Could not start PacketCapture: {e}")
+        capture_thread.start()
 
     # Shutdown signal handlers
     def handle_signal(sig, frame):
         logger.info("Signal received: shutting down SAGEDRAL-ML...")
         stop_event.set()
-        if sniffer and sniffer.is_running:
-            sniffer.stop()
+        capture_mod = global_container.capture_module
+        if capture_mod and capture_mod.is_running:
+            capture_mod.stop()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_signal)

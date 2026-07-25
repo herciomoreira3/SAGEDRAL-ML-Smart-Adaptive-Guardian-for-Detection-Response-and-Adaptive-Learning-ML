@@ -8,7 +8,7 @@ import logging
 import re
 import shutil
 import subprocess
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 logger = logging.getLogger("sagedral_ml.ips.response")
 
@@ -67,6 +67,37 @@ def validate_ip(ip: str) -> str:
         raise ValueError(f"Invalid IP address format: '{ip}'")
 
 
+def validate_ip_or_network(value: str) -> str:
+    """Validate either a single IP address or a CIDR network and return canonical string."""
+    if not value or not isinstance(value, str):
+        raise ValueError("IP address or CIDR network must be a non-empty string.")
+
+    cleaned = value.strip()
+    try:
+        if "/" in cleaned:
+            return str(ipaddress.ip_network(cleaned, strict=False))
+        return str(ipaddress.ip_address(cleaned))
+    except ValueError:
+        raise ValueError(f"Invalid IP/CIDR format: '{value}'")
+
+
+def calculate_escalated_duration(base_duration_seconds: Optional[int], strike_count: int) -> Optional[int]:
+    """Return strike-based block duration. None/0 means permanent."""
+    if base_duration_seconds is None or base_duration_seconds <= 0:
+        return None
+    if strike_count <= 1:
+        multiplier = 1
+    elif strike_count == 2:
+        multiplier = 4
+    elif strike_count == 3:
+        multiplier = 24
+    elif strike_count == 4:
+        multiplier = 168
+    else:
+        return None
+    return int(base_duration_seconds * multiplier)
+
+
 def get_default_gateway() -> Optional[str]:
     """Detect default route gateway IP address from system route table."""
     try:
@@ -95,18 +126,32 @@ class IPSModule:
         self.enabled = enabled
         self.preferred_backend = preferred_backend.lower()
         self.auto_unblock_after = auto_unblock_after
-        self.custom_whitelist: Set[str] = set(whitelist or [])
+        self.whitelist_single_ips: Set[ipaddress._BaseAddress] = set()
+        self.whitelist_subnets: List[ipaddress._BaseNetwork] = []
+        self._parse_whitelist_entries(whitelist or [])
         self.gateway_ip: Optional[str] = get_default_gateway()
-        # Auto-whitelist EVERY IPv4/IPv6 that is assigned to this host itself so
-        # we never classify legitimate ingress/egress self-traffic (e.g. user
-        # SSH-ing into VM or hitting dashboard from within VM, capture on wrong
-        # interface) as an attack and auto-block our own IPs.
         self.local_ips: Set[str] = get_local_ip_addresses()
+        self.ip_offense_history: Dict[str, int] = {}
 
         self.backend = self._determine_backend()
 
         if self.enabled and self.backend == "nftables":
             self.setup_nftables_table()
+
+    def _parse_whitelist_entries(self, entries: List[str]) -> None:
+        for entry in entries:
+            if not entry or not isinstance(entry, str):
+                continue
+            cleaned = entry.strip()
+            try:
+                if "/" in cleaned:
+                    network = ipaddress.ip_network(cleaned, strict=False)
+                    self.whitelist_subnets.append(network)
+                else:
+                    addr = ipaddress.ip_address(cleaned)
+                    self.whitelist_single_ips.add(addr)
+            except ValueError:
+                logger.warning(f"Skipping invalid whitelist entry: '{entry}'")
 
     def _determine_backend(self) -> str:
         if self.preferred_backend == "nftables" and shutil.which("nft"):
@@ -121,37 +166,113 @@ class IPSModule:
 
     def is_whitelisted(self, ip: str) -> bool:
         try:
-            clean_ip = validate_ip(ip)
+            clean_ip_str = validate_ip(ip)
+            parsed_ip = ipaddress.ip_address(clean_ip_str)
         except ValueError:
             return True
 
-        if clean_ip in HARDCODED_WHITELIST:
+        if clean_ip_str in HARDCODED_WHITELIST:
             return True
-        if clean_ip in self.custom_whitelist:
+        if parsed_ip in self.whitelist_single_ips:
             return True
-        if self.gateway_ip and clean_ip == self.gateway_ip:
+        for subnet in self.whitelist_subnets:
+            if parsed_ip in subnet:
+                return True
+        if self.gateway_ip and clean_ip_str == self.gateway_ip:
             return True
-        if clean_ip in self.local_ips:
+        if clean_ip_str in self.local_ips:
             return True
         return False
 
-    def add_to_whitelist(self, ip: str) -> bool:
+    def add_to_whitelist(self, entry: str) -> bool:
+        cleaned = (entry or "").strip()
+        if not cleaned:
+            return False
         try:
-            clean_ip = validate_ip(ip)
-            self.custom_whitelist.add(clean_ip)
+            if "/" in cleaned:
+                network = ipaddress.ip_network(cleaned, strict=False)
+                self.whitelist_subnets.append(network)
+            else:
+                addr = ipaddress.ip_address(cleaned)
+                self.whitelist_single_ips.add(addr)
             return True
         except ValueError:
             return False
 
-    def remove_from_whitelist(self, ip: str) -> bool:
+    def remove_from_whitelist(self, entry: str) -> bool:
+        cleaned = (entry or "").strip()
+        if not cleaned:
+            return False
         try:
-            clean_ip = validate_ip(ip)
-            if clean_ip in self.custom_whitelist:
-                self.custom_whitelist.remove(clean_ip)
-                return True
+            if "/" in cleaned:
+                network = ipaddress.ip_network(cleaned, strict=False)
+                if network in self.whitelist_subnets:
+                    self.whitelist_subnets.remove(network)
+                    return True
+            else:
+                addr = ipaddress.ip_address(cleaned)
+                if addr in self.whitelist_single_ips:
+                    self.whitelist_single_ips.remove(addr)
+                    return True
         except ValueError:
             pass
         return False
+
+    def is_entry_whitelisted(self, entry: str) -> bool:
+        """Validate a single IP or CIDR and check if it overlaps the protected whitelist."""
+        try:
+            if "/" in (entry or ""):
+                network = ipaddress.ip_network(entry.strip(), strict=False)
+                if any(ip in network for ip in self.whitelist_single_ips):
+                    return True
+                return any(network.overlaps(existing) for existing in self.whitelist_subnets)
+            return self.is_whitelisted(entry)
+        except ValueError:
+            return True
+
+    def strike_count_get(self, ip: str) -> int:
+        try:
+            clean_ip = validate_ip(ip)
+        except ValueError:
+            return 0
+        return self.ip_offense_history.get(clean_ip, 0)
+
+    def strike_count_incr(self, ip: str) -> int:
+        try:
+            clean_ip = validate_ip(ip)
+        except ValueError:
+            return 0
+        self.ip_offense_history[clean_ip] = self.ip_offense_history.get(clean_ip, 0) + 1
+        return self.ip_offense_history[clean_ip]
+
+    async def reconcile_from_db(self, db_session) -> None:
+        try:
+            from sagedral_ml.database import crud
+            active_blocked = await crud.get_active_blocked_ips(db_session)
+            logger.info(f"Reconciling {len(active_blocked)} active blocked IPs from database...")
+            success = 0
+            skipped_whitelisted = 0
+            failed = 0
+            for entry in active_blocked:
+                try:
+                    ip_str = entry.ip if hasattr(entry, "ip") else str(entry)
+                    if self.is_whitelisted(ip_str):
+                        logger.warning(f"Reconcile skip: IP {ip_str} is whitelisted")
+                        skipped_whitelisted += 1
+                        continue
+                    result = self.block_ip(ip_str)
+                    if result:
+                        success += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    logger.error(f"Reconcile error processing IP entry: {e}")
+                    failed += 1
+            logger.info(
+                f"IPS reconcile complete: success={success}, skipped_whitelisted={skipped_whitelisted}, failed={failed}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to reconcile IPS from database: {e}")
 
     def setup_nftables_table(self) -> bool:
         """Initialize sagedral nftables table and blocklist set."""

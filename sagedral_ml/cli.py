@@ -6,14 +6,32 @@ import sagedral_ml
 import os
 import sys
 import json
+import time
+import tarfile
+import shutil
 import click
 import requests
+from pathlib import Path
+from typing import List, Tuple
 from sagedral_ml import __version__
 from sagedral_ml.config import get_config, load_config, generate_default_toml_string, DEFAULT_CONFIG_PATH
 from sagedral_ml.ips.response import validate_ip
 
 
 API_BASE = "http://localhost:8000/api/v1"
+
+
+def _cli_error(msg: str, exit_code: int = 1) -> None:
+    click.secho(f"ERROR: {msg}", fg="red", bold=True)
+    sys.exit(exit_code)
+
+
+def _cli_warn(msg: str) -> None:
+    click.secho(f"WARNING: {msg}", fg="yellow")
+
+
+def _cli_ok(msg: str) -> None:
+    click.secho(msg, fg="green", bold=True)
 
 
 @click.group()
@@ -30,46 +48,59 @@ def main():
 @click.option("--no-capture", is_flag=True, help="Disable network packet capture (for development/testing)")
 def start(daemon, no_capture):
     """Start SAGEDRAL-ML NIDPS service."""
-    from sagedral_ml.main import run_app
+    try:
+        from sagedral_ml.main import run_app
 
-    click.echo("Starting SAGEDRAL-ML system...")
-    if daemon:
-        click.echo("Daemon mode activated.")
-    run_app(enable_capture=not no_capture)
+        click.echo("Starting SAGEDRAL-ML system...")
+        if daemon:
+            click.echo("Daemon mode activated.")
+        run_app(enable_capture=not no_capture)
+    except ImportError as e:
+        _cli_error(f"Failed to import runtime module: {e}")
+    except Exception as e:
+        _cli_error(f"Failed to start service: {e}")
 
 
 @main.command()
 def stop():
     """Stop running SAGEDRAL-ML service."""
-    click.echo("Stopping SAGEDRAL-ML service...")
-    # Send SIGTERM to process if running
-    os.system("pkill -f 'sagedral-ml start' || true")
-    click.echo("Stop command issued.")
+    try:
+        click.echo("Stopping SAGEDRAL-ML service...")
+        os.system("pkill -f 'sagedral-ml start' || true")
+        click.echo("Stop command issued.")
+    except Exception as e:
+        _cli_error(f"Error issuing stop command: {e}")
 
 
 @main.command()
 def status():
     """Check running status of SAGEDRAL-ML service."""
     try:
-        r = requests.get(f"{API_BASE}/status", timeout=2)
-        if r.status_code == 200:
-            data = r.json()
-            click.secho("SAGEDRAL-ML Service: RUNNING", fg="green", bold=True)
-            click.echo(f"  Interface:         {data.get('interface')}")
-            click.echo(f"  Uptime:            {data.get('uptime_seconds')}s")
-            click.echo(f"  Active Blocked IPs:{data.get('blocked_ips_count')}")
-            click.echo(f"  ML Model Loaded:   {data.get('ml_model_loaded')}")
-            return
-    except Exception:
-        pass
-    click.secho("SAGEDRAL-ML Service: STOPPED / UNREACHABLE", fg="red", bold=True)
+        try:
+            r = requests.get(f"{API_BASE}/status", timeout=2)
+            if r.status_code == 200:
+                data = r.json()
+                click.secho("SAGEDRAL-ML Service: RUNNING", fg="green", bold=True)
+                click.echo(f"  Interface:         {data.get('interface')}")
+                click.echo(f"  Uptime:            {data.get('uptime_seconds')}s")
+                click.echo(f"  Active Blocked IPs:{data.get('blocked_ips_count')}")
+                click.echo(f"  ML Model Loaded:   {data.get('ml_model_loaded')}")
+                return
+        except Exception:
+            pass
+        click.secho("SAGEDRAL-ML Service: STOPPED / UNREACHABLE", fg="red", bold=True)
+    except Exception as e:
+        _cli_error(f"Error checking status: {e}")
 
 
 @main.command()
 def restart():
     """Restart SAGEDRAL-ML service."""
-    stop.callback()
-    start.callback(daemon=True, no_capture=False)
+    try:
+        stop.callback()
+        start.callback(daemon=True, no_capture=False)
+    except Exception as e:
+        _cli_error(f"Error during restart: {e}")
 
 
 # ================= CONFIG COMMANDS =================
@@ -83,28 +114,222 @@ def config():
 @config.command("show")
 def config_show():
     """Show current active configuration."""
-    cfg = get_config()
-    click.echo(json.dumps(cfg.to_dict(), indent=2))
+    try:
+        cfg = get_config()
+        click.echo(json.dumps(cfg.to_dict(), indent=2))
+    except Exception as e:
+        _cli_error(f"Failed to load config: {e}")
 
 
 @config.command("template")
 def config_template():
     """Generate default config.toml template to stdout."""
-    click.echo(generate_default_toml_string())
+    try:
+        click.echo(generate_default_toml_string())
+    except Exception as e:
+        _cli_error(f"Failed to generate template: {e}")
 
 
 @config.command("validate")
 def config_validate():
     """Validate configuration file."""
-    cfg = get_config()
-    errors = cfg.validate()
-    if errors:
-        click.secho("Configuration Validation FAILED:", fg="red", bold=True)
-        for err in errors:
-            click.echo(f"  - {err}")
-        sys.exit(1)
-    else:
-        click.secho("Configuration is VALID.", fg="green", bold=True)
+    try:
+        cfg = get_config()
+        errors = cfg.validate()
+        if errors:
+            click.secho("Configuration Validation FAILED:", fg="red", bold=True)
+            for err in errors:
+                click.echo(f"  - {err}")
+            sys.exit(1)
+        else:
+            click.secho("Configuration is VALID.", fg="green", bold=True)
+    except Exception as e:
+        _cli_error(f"Validation error: {e}")
+
+
+# ================= BACKUP COMMANDS =================
+
+@main.group()
+def backup():
+    """Backup & restore configuration and database."""
+    pass
+
+
+@backup.command("create")
+@click.option("--output", "output_path", default=None, help="Output tar.gz archive path (default: ./sagedral-backup-<timestamp>.tar.gz)")
+def backup_create(output_path):
+    """Create compressed backup archive of config and database."""
+    try:
+        cfg = get_config()
+        db_path = cfg.get("database", "path", "/var/lib/sagedral-ml/sagedral.db")
+        data_dir = cfg.get("general", "data_dir", "/var/lib/sagedral-ml")
+        model_dir = cfg.get("ml", "model_dir", "/var/lib/sagedral-ml/models")
+
+        candidates = []
+        for p in (DEFAULT_CONFIG_PATH, Path.home() / ".config" / "sagedral" / "config.toml"):
+            try:
+                if Path(p).exists():
+                    candidates.append(str(p))
+                    break
+            except Exception:
+                pass
+        if not candidates:
+            _cli_warn("No config.toml file found on disk; backing up in-memory config snapshot only.")
+
+        sources: List[Tuple[str, str]] = []
+        for file_path in candidates:
+            sources.append((file_path, os.path.basename(file_path)))
+
+        if os.path.exists(db_path):
+            sources.append((db_path, f"database/{os.path.basename(db_path)}"))
+
+        if os.path.isdir(model_dir):
+            for root, _, files in os.walk(model_dir):
+                for f in files:
+                    src_full = os.path.join(root, f)
+                    rel = os.path.relpath(src_full, os.path.dirname(model_dir) or data_dir)
+                    sources.append((src_full, f"models/{rel}"))
+
+        if not output_path:
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            output_path = os.path.join(os.getcwd(), f"sagedral-backup-{ts}.tar.gz")
+
+        output_path = os.path.abspath(output_path)
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+        click.echo(f"Creating backup archive -> {output_path}")
+        count = 0
+        with tarfile.open(output_path, "w:gz") as tar:
+            for src_full, arc_name in sources:
+                try:
+                    tar.add(src_full, arcname=arc_name)
+                    count += 1
+                    click.echo(f"  + {arc_name}")
+                except Exception as e:
+                    _cli_warn(f"Skip {src_full}: {e}")
+
+            manifest = {
+                "created_at": time.time(),
+                "version": __version__,
+                "config_snapshot": cfg.to_dict(),
+                "entries": [a for _, a in sources],
+            }
+            import io
+            manifest_bytes = json.dumps(manifest, indent=2).encode("utf-8")
+            info = tarfile.TarInfo(name="manifest.json")
+            info.size = len(manifest_bytes)
+            tar.addfile(info, io.BytesIO(manifest_bytes))
+            count += 1
+
+        archive_size = os.path.getsize(output_path)
+        _cli_ok(f"Backup complete: {output_path} ({count} files, {archive_size} bytes)")
+        return
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        _cli_error(f"Backup creation failed: {e}")
+
+
+@backup.command("restore")
+@click.option("--source", "source_path", required=True, type=click.Path(exists=True, dir_okay=False), help="Path to backup tar.gz archive")
+@click.option("--confirm", is_flag=True, default=False, help="Confirm destructive restore operation")
+def backup_restore(source_path, confirm):
+    """Restore configuration and database from backup archive."""
+    try:
+        source_path = os.path.abspath(source_path)
+        if not confirm:
+            click.secho(
+                "WARNING: Restore will OVERWRITE existing database and model files. Re-run with --confirm to proceed.",
+                fg="yellow",
+                bold=True,
+            )
+            sys.exit(2)
+
+        cfg = get_config()
+        db_path = cfg.get("database", "path", "/var/lib/sagedral-ml/sagedral.db")
+        data_dir = cfg.get("general", "data_dir", "/var/lib/sagedral-ml")
+        model_dir = cfg.get("ml", "model_dir", "/var/lib/sagedral-ml/models")
+
+        click.echo(f"Restoring from backup: {source_path}")
+
+        manifest = None
+        try:
+            with tarfile.open(source_path, "r:gz") as tar:
+                if "manifest.json" in tar.getnames():
+                    mbr = tar.getmember("manifest.json")
+                    f = tar.extractfile(mbr)
+                    if f:
+                        manifest = json.loads(f.read().decode("utf-8"))
+                        click.echo(f"  Manifest: version={manifest.get('version')}, created={manifest.get('created_at')}")
+        except Exception as e:
+            _cli_warn(f"Could not read manifest.json: {e}")
+
+        extract_dir = os.path.join(data_dir, f"restore-{int(time.time())}")
+        os.makedirs(extract_dir, exist_ok=True)
+
+        try:
+            with tarfile.open(source_path, "r:gz") as tar:
+                tar.extractall(path=extract_dir)
+        except Exception as e:
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            _cli_error(f"Failed to extract archive: {e}")
+            return
+
+        restored = 0
+        try:
+            extracted_db = os.path.join(extract_dir, "database", os.path.basename(db_path))
+            if os.path.exists(extracted_db):
+                os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+                if os.path.exists(db_path):
+                    bak = f"{db_path}.before-restore-{int(time.time())}"
+                    shutil.copy2(db_path, bak)
+                    click.echo(f"  Existing DB backed up: {bak}")
+                shutil.copy2(extracted_db, db_path)
+                restored += 1
+                click.echo(f"  Restored database -> {db_path}")
+
+            extracted_models = os.path.join(extract_dir, "models")
+            if os.path.isdir(extracted_models):
+                os.makedirs(model_dir, exist_ok=True)
+                for root, _, files in os.walk(extracted_models):
+                    for fname in files:
+                        src = os.path.join(root, fname)
+                        rel = os.path.relpath(src, extracted_models)
+                        dst = os.path.join(model_dir, rel)
+                        os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+                        shutil.copy2(src, dst)
+                        restored += 1
+                click.echo(f"  Restored models -> {model_dir}")
+
+            for cfg_name in ("config.toml",):
+                cfg_src = os.path.join(extract_dir, cfg_name)
+                if os.path.exists(cfg_src):
+                    target = str(DEFAULT_CONFIG_PATH)
+                    try:
+                        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+                        if os.path.exists(target):
+                            bak = f"{target}.before-restore-{int(time.time())}"
+                            shutil.copy2(target, bak)
+                            click.echo(f"  Existing config backed up: {bak}")
+                        shutil.copy2(cfg_src, target)
+                        restored += 1
+                        click.echo(f"  Restored config -> {target}")
+                    except Exception as e:
+                        _cli_warn(f"Could not write config to {target}: {e}")
+        except Exception as e:
+            _cli_error(f"Restore phase failed: {e}")
+        finally:
+            shutil.rmtree(extract_dir, ignore_errors=True)
+
+        if restored == 0:
+            _cli_warn("No recognized backup files were restored. Check archive contents.")
+        else:
+            _cli_ok(f"Restore complete: {restored} item(s). Restart service to apply changes.")
+        return
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        _cli_error(f"Backup restore failed: {e}")
 
 
 # ================= IP MANAGEMENT COMMANDS =================
@@ -118,7 +343,7 @@ def block(ip, duration, reason):
     try:
         clean_ip = validate_ip(ip)
     except ValueError as e:
-        click.secho(f"Error: {e}", fg="red")
+        _cli_error(str(e))
         return
 
     try:
@@ -126,11 +351,11 @@ def block(ip, duration, reason):
             "ip": clean_ip, "reason": reason, "duration_seconds": duration
         }, timeout=3)
         if r.status_code == 200:
-            click.secho(f"Successfully blocked IP {clean_ip}", fg="green")
+            _cli_ok(f"Successfully blocked IP {clean_ip}")
         else:
-            click.secho(f"Failed: {r.json().get('detail', r.text)}", fg="red")
+            _cli_error(f"{r.json().get('detail', r.text)}")
     except Exception as e:
-        click.secho(f"API request failed: {e}", fg="red")
+        _cli_error(f"API request failed: {e}")
 
 
 @main.command()
@@ -140,17 +365,17 @@ def unblock(ip):
     try:
         clean_ip = validate_ip(ip)
     except ValueError as e:
-        click.secho(f"Error: {e}", fg="red")
+        _cli_error(str(e))
         return
 
     try:
         r = requests.delete(f"{API_BASE}/blocked-ips/{clean_ip}", timeout=3)
         if r.status_code == 200:
-            click.secho(f"Successfully unblocked IP {clean_ip}", fg="green")
+            _cli_ok(f"Successfully unblocked IP {clean_ip}")
         else:
-            click.secho(f"Failed: {r.json().get('detail', r.text)}", fg="red")
+            _cli_error(f"{r.json().get('detail', r.text)}")
     except Exception as e:
-        click.secho(f"API request failed: {e}", fg="red")
+        _cli_error(f"API request failed: {e}")
 
 
 # ================= ALERTS COMMANDS =================
@@ -180,8 +405,10 @@ def alerts_list(limit):
                 t_str = datetime.datetime.fromtimestamp(a["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
                 click.echo(f"{t_str:<20} {a['src_ip']:<16} {a['dst_ip']:<16} {a['attack_type']:<15} {a['severity']:<10} {a['action_taken']:<10}")
             return
+        else:
+            _cli_error(f"API returned {r.status_code}: {r.text}")
     except Exception as e:
-        click.secho(f"API request failed: {e}", fg="red")
+        _cli_error(f"API request failed: {e}")
 
 
 # ================= MODEL COMMANDS =================
@@ -197,83 +424,143 @@ def model():
 @click.option("--model-dir", default=None, help="Override model directory path (default: from config)")
 def model_init(force, model_dir):
     """Initialize / regenerate ML detection models (installs fallback models if none exist)."""
-    cfg = get_config()
-    resolved_dir = model_dir if model_dir else cfg.get("ml", "model_dir", "/var/lib/sagedral-ml/models")
-    enabled = cfg.get("ml", "enabled", True)
-    anomaly_threshold = float(cfg.get("ml", "anomaly_threshold", 0.7))
-    classifier_threshold = float(cfg.get("ml", "classifier_threshold", 0.6))
+    try:
+        cfg = get_config()
+        resolved_dir = model_dir if model_dir else cfg.get("ml", "model_dir", "/var/lib/sagedral-ml/models")
+        enabled = cfg.get("ml", "enabled", True)
+        anomaly_threshold = float(cfg.get("ml", "anomaly_threshold", 0.7))
+        classifier_threshold = float(cfg.get("ml", "classifier_threshold", 0.6))
 
-    if force:
-        for fname in ("anomaly_detector.pkl", "attack_classifier.pkl", "feature_names.json"):
-            fp = os.path.join(resolved_dir, fname)
-            if os.path.exists(fp):
-                try:
-                    os.remove(fp)
-                except OSError as e:
-                    click.secho(f"Warning: could not remove {fp}: {e}", fg="yellow")
+        if force:
+            for fname in ("anomaly_detector.pkl", "attack_classifier.pkl", "feature_names.json"):
+                fp = os.path.join(resolved_dir, fname)
+                if os.path.exists(fp):
+                    try:
+                        os.remove(fp)
+                    except OSError as e:
+                        _cli_warn(f"could not remove {fp}: {e}")
 
-    click.echo(f"Initializing ML models in {resolved_dir} ...")
-    from sagedral_ml.detection.ml_engine import MLEngine
-    engine = MLEngine(
-        model_dir=resolved_dir,
-        anomaly_threshold=anomaly_threshold,
-        classifier_threshold=classifier_threshold,
-        enabled=enabled,
-    )
+        click.echo(f"Initializing ML models in {resolved_dir} ...")
+        from sagedral_ml.detection.ml_engine import MLEngine
+        engine = MLEngine(
+            model_dir=resolved_dir,
+            anomaly_threshold=anomaly_threshold,
+            classifier_threshold=classifier_threshold,
+            enabled=enabled,
+        )
 
-    if engine.model_loaded:
-        click.secho(f"[OK] ML models ready. loaded={engine.model_loaded} version={engine.version}", fg="green", bold=True)
-        click.echo(f"  anomaly_model.pkl : {os.path.exists(os.path.join(resolved_dir, 'anomaly_detector.pkl'))}")
-        click.echo(f"  attack_classifier : {os.path.exists(os.path.join(resolved_dir, 'attack_classifier.pkl'))}")
-        if "rulebased" in engine.version:
-            click.secho("  Note: rule-based fallback active. Install lightgbm+scikit-learn for trained models.", fg="yellow")
-        elif "fallback" in engine.version:
-            click.secho("  Note: synthetic data fallback active. Train on real dataset for production accuracy.", fg="yellow")
-        sys.exit(0)
-    else:
-        click.secho("[FAILED] Could not initialize ML models. Check logs above.", fg="red", bold=True)
-        sys.exit(1)
+        if engine.model_loaded:
+            _cli_ok(f"[OK] ML models ready. loaded={engine.model_loaded} version={engine.version}")
+            click.echo(f"  anomaly_model.pkl : {os.path.exists(os.path.join(resolved_dir, 'anomaly_detector.pkl'))}")
+            click.echo(f"  attack_classifier : {os.path.exists(os.path.join(resolved_dir, 'attack_classifier.pkl'))}")
+            if "rulebased" in engine.version:
+                _cli_warn("rule-based fallback active. Install lightgbm+scikit-learn for trained models.")
+            elif "fallback" in engine.version:
+                _cli_warn("synthetic data fallback active. Train on real dataset for production accuracy.")
+            sys.exit(0)
+        else:
+            _cli_error("Could not initialize ML models. Check logs above.")
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        _cli_error(f"Model init failed: {e}")
 
 
 @model.command("info")
 def model_info():
     """Show details of loaded ML models."""
-    # Offline: instantiate local engine to inspect files; online: hit API if service is running
-    offline_info = None
     try:
-        cfg = get_config()
-        resolved_dir = cfg.get("ml", "model_dir", "/var/lib/sagedral-ml/models")
-        from sagedral_ml.detection.ml_engine import MLEngine
-        engine = MLEngine(
-            model_dir=resolved_dir,
-            anomaly_threshold=float(cfg.get("ml", "anomaly_threshold", 0.7)),
-            classifier_threshold=float(cfg.get("ml", "classifier_threshold", 0.6)),
-            enabled=cfg.get("ml", "enabled", True),
-        )
-        offline_info = {
-            "enabled": cfg.get("ml", "enabled", True),
-            "loaded": engine.model_loaded,
-            "model_dir": resolved_dir,
-            "model_version": engine.version,
-            "local": True,
-        }
+        offline_info = None
+        try:
+            cfg = get_config()
+            resolved_dir = cfg.get("ml", "model_dir", "/var/lib/sagedral-ml/models")
+            from sagedral_ml.detection.ml_engine import MLEngine
+            engine = MLEngine(
+                model_dir=resolved_dir,
+                anomaly_threshold=float(cfg.get("ml", "anomaly_threshold", 0.7)),
+                classifier_threshold=float(cfg.get("ml", "classifier_threshold", 0.6)),
+                enabled=cfg.get("ml", "enabled", True),
+            )
+            offline_info = {
+                "enabled": cfg.get("ml", "enabled", True),
+                "loaded": engine.model_loaded,
+                "model_dir": resolved_dir,
+                "model_version": engine.version,
+                "local": True,
+            }
+        except Exception as e:
+            offline_info = {"error": str(e), "local": True}
+
+        try:
+            r = requests.get(f"{API_BASE}/model/info", timeout=2)
+            if r.status_code == 200:
+                online = r.json()
+                online["local"] = False
+                click.echo(json.dumps(online, indent=2))
+                return
+        except Exception:
+            pass
+
+        if offline_info is not None:
+            click.echo(json.dumps(offline_info, indent=2))
+        else:
+            _cli_error("Service not running and local engine unavailable.")
+    except click.exceptions.Exit:
+        raise
     except Exception as e:
-        offline_info = {"error": str(e), "local": True}
+        _cli_error(f"Model info failed: {e}")
 
+
+@main.command()
+@click.option("--dataset", "dataset_path", required=True, type=click.Path(exists=True, dir_okay=False), help="Path to input CSV dataset (CICIDS-style)")
+@click.option("--save-dir", required=True, type=click.Path(file_okay=False), help="Directory to write trained model artifacts")
+@click.option("--hot-reload", is_flag=True, default=False, help="After training, notify running API to reload models via restart hint")
+def train(dataset_path, save_dir, hot_reload):
+    """Train LightGBM anomaly detector & attack classifier from dataset CSV."""
     try:
-        r = requests.get(f"{API_BASE}/model/info", timeout=2)
-        if r.status_code == 200:
-            online = r.json()
-            online["local"] = False
-            click.echo(json.dumps(online, indent=2))
-            return
-    except Exception:
-        pass
+        dataset_path = os.path.abspath(dataset_path)
+        save_dir = os.path.abspath(save_dir)
+        os.makedirs(save_dir, exist_ok=True)
 
-    if offline_info is not None:
-        click.echo(json.dumps(offline_info, indent=2))
-    else:
-        click.secho("Service not running and local engine unavailable.", fg="red")
+        click.echo(f"Dataset    : {dataset_path}")
+        click.echo(f"Save dir   : {save_dir}")
+        click.echo(f"Hot reload : {hot_reload}")
+
+        try:
+            from sagedral_ml.scripts.train_model import train_models
+        except ImportError as e:
+            _cli_error(f"train_models module unavailable: {e}. Ensure numpy/pandas/lightgbm/scikit-learn installed.")
+            return
+
+        try:
+            train_models(dataset_path=dataset_path, output_dir=save_dir)
+        except Exception as e:
+            _cli_error(f"Training pipeline failed: {e}")
+            return
+
+        required_files = ["anomaly_detector.pkl", "attack_classifier.pkl", "feature_names.json"]
+        missing = [f for f in required_files if not os.path.exists(os.path.join(save_dir, f))]
+        if missing:
+            _cli_warn(f"Training finished but missing expected artifacts: {missing}")
+        else:
+            _cli_ok(f"Training complete. Models saved to {save_dir}")
+
+        if hot_reload:
+            click.echo("Hot reload requested: attempting to notify service (service restart recommended).")
+            try:
+                r = requests.get(f"{API_BASE}/status", timeout=2)
+                if r.status_code == 200:
+                    _cli_ok("Service is running. For hot reload, re-init model via API or restart service.")
+                else:
+                    _cli_warn(f"Service status check returned {r.status_code}; cannot trigger hot reload.")
+            except Exception as e:
+                _cli_warn(f"Service unreachable for hot reload notification: {e}")
+            click.echo("  Tip: set ml.model_dir in config to the trained save-dir, then restart or reload.")
+        return
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        _cli_error(f"Train command failed: {e}")
 
 
 # ================= SELF-TEST COMMANDS (Sniffer + Capture Debug WSL) =================
@@ -315,134 +602,131 @@ def selftest_capture(iface, duration, external_ip):
     Paket KELUAR interface BENAR → AF_PACKET menangkap → tcpdump/scapy BISA baca.
     Output: Packet count per interface + rekomendasi interface capture terbaik.
     """
-    import random, socket, subprocess, threading, tempfile, time
-    if os.geteuid() != 0:
-        click.secho("[FAIL] SELFTEST CAPTURE BUTUH ROOT. Jalankan sudo.", fg="red", bold=True)
-        sys.exit(2)
-
-    iface_auto, primary_ip, cidr = _cli_detect_primary_iface_and_ip()
-    iface = iface or iface_auto
-
-    click.secho(f"=== SAGEDRAL SELFTEST: CAPTURE INTERFACE ===", bold=True)
-    click.echo(f"  Primary interface  : {iface} (IP={primary_ip})")
-    click.echo(f"  External dst IP    : {external_ip} (paket keluar via real NIC WiFi0)")
-    click.echo(f"  Duration           : {duration}s")
-    click.echo(f"  Teknik             : UDP/TCP/ICMP keluar via default route → AF_PACKET capture.")
-
-    # --- Start tcpdump di beberapa interface parallel ---
-    candidates = ["any", iface, "lo"]
-    candidates = list(dict.fromkeys(candidates))
-    procs = {}
-    outfiles = {}
     try:
-        for i in candidates:
-            tf = tempfile.NamedTemporaryFile(delete=False, suffix=f".cap{i}.txt")
-            tf.close()
-            outfiles[i] = tf.name
-            try:
-                p = subprocess.Popen(
-                    ["tcpdump", "-ni", i, "-c", "1500", "-Q", "out",
-                     f"(udp or tcp or icmp) and dst host {external_ip}"],
-                    stdout=open(tf.name, "w", encoding="utf-8"),
-                    stderr=subprocess.DEVNULL,
-                )
-                procs[i] = p
-            except Exception as e:
-                click.secho(f"  [!] tcpdump gagal iface {i}: {e}", fg="yellow")
-        click.echo(f"\n[*] Tunggu 1.5d tcpdump ready...")
-        time.sleep(1.5)
+        import random, socket, subprocess, threading, tempfile, time
+        try:
+            if os.geteuid() != 0:
+                _cli_error("SELFTEST CAPTURE BUTUH ROOT. Jalankan sudo.")
+                sys.exit(2)
+        except AttributeError:
+            _cli_warn("Cannot detect UID; assuming Windows/non-POSIX. Capture tests may require elevated privileges.")
 
-        # --- Kirim 80+ probe packets ke EXTERNAL IP ---
-        def _send():
-            # 50 UDP random payload ke external_ip:53
-            try:
-                u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                for _ in range(50):
-                    try:
-                        payload = bytes([random.randint(0,255) for _ in range(random.randint(64, 512))])
-                        u.sendto(payload, (external_ip, random.choice([53, 5353, 123, 67, 80, 443])))
-                    except Exception:
-                        pass
-                    time.sleep(0.001)
-                u.close()
-            except Exception:
-                pass
-            # 25 TCP SYN (non-blocking connect_ex)
-            for _ in range(25):
+        iface_auto, primary_ip, cidr = _cli_detect_primary_iface_and_ip()
+        iface = iface or iface_auto
+
+        click.secho(f"=== SAGEDRAL SELFTEST: CAPTURE INTERFACE ===", bold=True)
+        click.echo(f"  Primary interface  : {iface} (IP={primary_ip})")
+        click.echo(f"  External dst IP    : {external_ip} (paket keluar via real NIC WiFi0)")
+        click.echo(f"  Duration           : {duration}s")
+        click.echo(f"  Teknik             : UDP/TCP/ICMP keluar via default route → AF_PACKET capture.")
+
+        candidates = ["any", iface, "lo"]
+        candidates = list(dict.fromkeys(candidates))
+        procs = {}
+        outfiles = {}
+        try:
+            for i in candidates:
+                tf = tempfile.NamedTemporaryFile(delete=False, suffix=f".cap{i}.txt")
+                tf.close()
+                outfiles[i] = tf.name
                 try:
-                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.settimeout(0.03)
-                    s.setblocking(False)
-                    try: s.connect_ex((external_ip, random.choice([80,443,22,53,8080])))
-                    except Exception: pass
-                    try: s.close()
-                    except Exception: pass
+                    p = subprocess.Popen(
+                        ["tcpdump", "-ni", i, "-c", "1500", "-Q", "out",
+                         f"(udp or tcp or icmp) and dst host {external_ip}"],
+                        stdout=open(tf.name, "w", encoding="utf-8"),
+                        stderr=subprocess.DEVNULL,
+                    )
+                    procs[i] = p
+                except Exception as e:
+                    _cli_warn(f"tcpdump gagal iface {i}: {e}")
+            click.echo(f"\n[*] Tunggu 1.5d tcpdump ready...")
+            time.sleep(1.5)
+
+            def _send():
+                try:
+                    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    for _ in range(50):
+                        try:
+                            payload = bytes([random.randint(0,255) for _ in range(random.randint(64, 512))])
+                            u.sendto(payload, (external_ip, random.choice([53, 5353, 123, 67, 80, 443])))
+                        except Exception:
+                            pass
+                        time.sleep(0.001)
+                    u.close()
                 except Exception:
                     pass
-                time.sleep(0.005)
-            # 10 ICMP ping -c 1
+                for _ in range(25):
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(0.03)
+                        s.setblocking(False)
+                        try: s.connect_ex((external_ip, random.choice([80,443,22,53,8080])))
+                        except Exception: pass
+                        try: s.close()
+                        except Exception: pass
+                    except Exception:
+                        pass
+                    time.sleep(0.005)
+                try:
+                    for _ in range(10):
+                        subprocess.run(["ping", "-c", "1", "-W", "1", external_ip],
+                                       capture_output=True, timeout=3, check=False)
+                except Exception:
+                    pass
+                click.echo(f"\n  [SEND OK] 85+ probe packets keluar menuju {external_ip} via wifi0 default route.")
+            t_send = threading.Thread(target=_send, daemon=True)
+            t_send.start()
+            t_send.join(timeout=duration)
+
+            time.sleep(2.5)
+        finally:
+            for i, p in procs.items():
+                try:
+                    p.terminate()
+                    try: p.wait(timeout=2)
+                    except Exception: p.kill()
+                except Exception:
+                    pass
+
+        click.echo(f"\n{'─'*60}")
+        click.secho("HASIL: Packet COUNT tertangkap per interface (outgoing ke %s):\n" % external_ip, bold=True)
+        click.echo(f"  {'Interface':15s}  Packets  Status")
+        click.echo(f"  {'─'*15}  ───────  ───────────")
+        scored = []
+        for i, fpath in outfiles.items():
             try:
-                for _ in range(10):
-                    subprocess.run(["ping", "-c", "1", "-W", "1", external_ip],
-                                   capture_output=True, timeout=3, check=False)
+                with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = [ln for ln in f.readlines() if ln.strip() and "listening on" not in ln and "tcpdump:" not in ln]
+                count = len(lines)
             except Exception:
-                pass
-            click.echo(f"\n  [SEND OK] 85+ probe packets keluar menuju {external_ip} via wifi0 default route.")
-        t_send = threading.Thread(target=_send, daemon=True)
-        t_send.start()
-        t_send.join(timeout=duration)
+                count = -1
+            mark = "✅ CAPTURE OK (>20)" if count >= 20 else ("⚠️  (<20)" if count > 0 else "❌ TIDAK ADA PAKET")
+            click.echo(f"  {i:15s}  {count:>7d}  {mark}")
+            scored.append((i, count))
+            try: os.unlink(fpath)
+            except Exception: pass
 
-        # --- Tunggu sisa duration, kill tcpdump ---
-        remaining = max(1, duration - int(time.time() - (time.time())))
-        # simpler: tunggu sisa 2.5 detik
-        time.sleep(2.5)
-    finally:
-        for i, p in procs.items():
-            try:
-                p.terminate()
-                try: p.wait(timeout=2)
-                except Exception: p.kill()
-            except Exception:
-                pass
+        scored_sorted = sorted(scored, key=lambda x: (-x[1], 0 if x[0]!="any" else 1))
+        best_name, best_cnt = scored_sorted[0]
+        click.echo(f"\n[REKOMENDASI] capture.interface = {best_name}  (packets={best_cnt})")
 
-    # --- Count packets captured ---
-    click.echo(f"\n{'─'*60}")
-    click.secho("HASIL: Packet COUNT tertangkap per interface (outgoing ke %s):\n" % external_ip, bold=True)
-    click.echo(f"  {'Interface':15s}  Packets  Status")
-    click.echo(f"  {'─'*15}  ───────  ───────────")
-    best = ("any", 0)
-    scored = []
-    for i, fpath in outfiles.items():
-        try:
-            with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                lines = [ln for ln in f.readlines() if ln.strip() and "listening on" not in ln and "tcpdump:" not in ln]
-            count = len(lines)
-        except Exception:
-            count = -1
-        mark = "✅ CAPTURE OK (>20)" if count >= 20 else ("⚠️  (<20)" if count > 0 else "❌ TIDAK ADA PAKET")
-        click.echo(f"  {i:15s}  {count:>7d}  {mark}")
-        scored.append((i, count))
-        try: os.unlink(fpath)
-        except Exception: pass
-
-    # Best iface = highest count; prefer specific over 'any'
-    scored_sorted = sorted(scored, key=lambda x: (-x[1], 0 if x[0]!="any" else 1))
-    best_name, best_cnt = scored_sorted[0]
-    click.echo(f"\n[REKOMENDASI] capture.interface = {best_name}  (packets={best_cnt})")
-
-    if best_cnt < 20:
-        click.secho("\n[WARN] Packet capture < 20! WSL network mungkin firewall luar blokir atau route tidak ke wifi0.", fg="yellow", bold=True)
-        click.echo("   Solusi:")
-        click.echo("     1. Pastikan Windows host Anda terkoneksi Internet aktif (WiFi/Hotspot HP).")
-        click.echo("     2. Coba ganti --external-ip=1.1.1.1 / --external-ip=208.67.222.222.")
-        click.echo("     3. Pastikan WSL mirror mode auto-proxy TIDAK memblock paket UDP/ICMP keluar.")
-        click.echo("     4. Jika tetap 0 → firewall Windows/antivirus blocking. Untuk test sementara gunakan inject_flow_simulator.py.")
-        sys.exit(3)
-    else:
-        click.secho(f"\n[✅] SNIFFER SAGEDRAL BISA MENANGKAP PAKET di interface {best_name}.", fg="green", bold=True)
-        click.echo("   Sekarang Anda bisa jalankan attack script yang menargetkan IP EXTERNAL + SNAT spoof src IP.")
-        click.echo(f"   Silakan lanjut ke: sudo python3 sagedral_full_test_wsl.py --iface {best_name}")
-        sys.exit(0)
+        if best_cnt < 20:
+            click.secho("\n[WARN] Packet capture < 20! WSL network mungkin firewall luar blokir atau route tidak ke wifi0.", fg="yellow", bold=True)
+            click.echo("   Solusi:")
+            click.echo("     1. Pastikan Windows host Anda terkoneksi Internet aktif (WiFi/Hotspot HP).")
+            click.echo("     2. Coba ganti --external-ip=1.1.1.1 / --external-ip=208.67.222.222.")
+            click.echo("     3. Pastikan WSL mirror mode auto-proxy TIDAK memblock paket UDP/ICMP keluar.")
+            click.echo("     4. Jika tetap 0 → firewall Windows/antivirus blocking. Untuk test sementara gunakan inject_flow_simulator.py.")
+            sys.exit(3)
+        else:
+            _cli_ok(f"[✅] SNIFFER SAGEDRAL BISA MENANGKAP PAKET di interface {best_name}.")
+            click.echo("   Sekarang Anda bisa jalankan attack script yang menargetkan IP EXTERNAL + SNAT spoof src IP.")
+            click.echo(f"   Silakan lanjut ke: sudo python3 sagedral_full_test_wsl.py --iface {best_name}")
+            sys.exit(0)
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        _cli_error(f"Selftest capture failed: {e}")
 
 
 @selftest.command("sniffer-status")
@@ -451,7 +735,7 @@ def selftest_sniffer_status():
     try:
         r = requests.get(f"{API_BASE}/status", timeout=2.5)
         if r.status_code != 200:
-            click.secho("Service OFFLINE. Start dulu: sagedral-ml start", fg="red")
+            _cli_error(f"Service OFFLINE. Start dulu: sagedral-ml start (HTTP {r.status_code})")
             sys.exit(1)
         data = r.json()
         click.secho("Live capture status:", bold=True)
@@ -459,7 +743,7 @@ def selftest_sniffer_status():
                   "packets_captured_total", "flows_processed", "alerts_total_count"):
             if k in data:
                 click.echo(f"  {k:35s} = {data[k]}")
+    except click.exceptions.Exit:
+        raise
     except Exception as e:
-        click.secho(f"Gagal query API: {e}. Jalankan service dulu: sagedral-ml start", fg="red")
-        sys.exit(1)
-
+        _cli_error(f"Gagal query API: {e}. Jalankan service dulu: sagedral-ml start")

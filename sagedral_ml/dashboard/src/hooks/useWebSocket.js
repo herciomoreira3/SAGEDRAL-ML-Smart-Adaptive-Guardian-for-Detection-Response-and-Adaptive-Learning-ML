@@ -10,7 +10,9 @@ export function useWebSocket() {
   const getWsUrl = () => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
-    return `${protocol}//${host}/ws/alerts`;
+    const token = localStorage.getItem('sagedral_token');
+    const qs = token ? `?token=${encodeURIComponent(token)}` : '';
+    return `${protocol}//${host}/ws/alerts${qs}`;
   };
 
   const connect = useCallback(() => {

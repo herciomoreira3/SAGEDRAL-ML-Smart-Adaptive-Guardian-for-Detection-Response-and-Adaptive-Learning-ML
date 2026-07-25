@@ -27,6 +27,16 @@ uvicorn[standard]>=0.23.0,<0.30  # ASGI server + WebSocket + HTTP/2
 websockets>=11.0,<13       # WebSocket server (cap <13 to keep Py3.8 compat)
 httpx>=0.24.0,<0.28        # Async HTTP client (used in tests + retrain trigger)
 
+# ── Auth & Security ───────────────────────────────────────────
+python-jose[cryptography]>=3.3.0  # JWT encode/decode (HS256, RS256 support via cryptography)
+passlib[bcrypt]>=1.7.4            # Password hashing context (bcrypt backend)
+bcrypt>=4.0.0,<4.2                # bcrypt algorithm (Py3.8 compatible 4.0.x)
+python-multipart>=0.0.6           # Required by FastAPI OAuth2PasswordRequestForm (form-data login)
+email-validator>=2.0.0            # (Optional) future user email validation
+slowapi>=0.1.9                    # API rate limiting for sensitive endpoints
+limits>=3.0.0                     # Rate limit storage/strategy backend used by slowapi
+python-json-logger>=2.0.7         # Structured JSON logs for production aggregation
+
 # ── Database (Async SQLite) ───────────────────────────────────
 sqlalchemy[asyncio]>=2.0.0,<2.1  # Async ORM (cap <2.1 to ensure Py3.8 compat)
 aiosqlite>=0.19.0          # Async SQLite driver for SQLAlchemy

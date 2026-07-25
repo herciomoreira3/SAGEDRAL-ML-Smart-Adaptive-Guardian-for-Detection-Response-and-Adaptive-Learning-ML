@@ -15,6 +15,8 @@ from sagedral_ml.database.models import (
     TrafficStatModel,
     ConfigHistoryModel,
     SignatureRuleModel,
+    IPOffenseHistoryModel,
+    AlertFeedbackModel,
 )
 
 logger = logging.getLogger("sagedral_ml.database.crud")
@@ -45,6 +47,7 @@ async def create_alert(db: AsyncSession, alert_data: Dict[str, Any]) -> AlertMod
         ml_anomaly_score=alert_data.get("ml_anomaly_score"),
         flow_duration=alert_data.get("flow_duration"),
         total_bytes=alert_data.get("total_bytes"),
+        status=alert_data.get("status", "open"),
     )
     db.add(alert)
     await db.commit()
@@ -98,6 +101,65 @@ async def get_recent_alerts(db: AsyncSession, limit: int = 10) -> List[AlertMode
     return list(res.scalars().all())
 
 
+async def get_alert_by_alert_id(db: AsyncSession, alert_id: str) -> Optional[AlertModel]:
+    stmt = select(AlertModel).where(AlertModel.alert_id == alert_id)
+    res = await db.execute(stmt)
+    return res.scalar_one_or_none()
+
+
+async def close_alert(db: AsyncSession, alert_id: str) -> bool:
+    stmt = (
+        update(AlertModel)
+        .where(AlertModel.alert_id == alert_id)
+        .values(status="closed", closed_at=time.time())
+    )
+    res = await db.execute(stmt)
+    await db.commit()
+    return res.rowcount > 0
+
+
+async def delete_alert(db: AsyncSession, alert_id: str) -> bool:
+    stmt = delete(AlertModel).where(AlertModel.alert_id == alert_id)
+    res = await db.execute(stmt)
+    await db.commit()
+    return res.rowcount > 0
+
+
+async def bulk_delete_alerts(db: AsyncSession, alert_ids: List[str]) -> int:
+    if not alert_ids:
+        return 0
+    stmt = delete(AlertModel).where(AlertModel.alert_id.in_(alert_ids))
+    res = await db.execute(stmt)
+    await db.commit()
+    return int(res.rowcount or 0)
+
+
+async def create_alert_feedback(
+    db: AsyncSession,
+    feedback_data: Dict[str, Any],
+) -> AlertFeedbackModel:
+    alert = await get_alert_by_alert_id(db, feedback_data["alert_id"])
+    if alert is None:
+        raise ValueError(f"Alert {feedback_data['alert_id']} not found")
+
+    label = str(feedback_data["label"]).upper()
+    notes = feedback_data.get("notes") or ""
+    created_by = feedback_data.get("created_by")
+
+    feedback = AlertFeedbackModel(
+        alert_id=feedback_data["alert_id"],
+        label=label,
+        notes=notes,
+        created_by=created_by,
+    )
+    db.add(feedback)
+    alert.feedback_label = label
+    alert.feedback_notes = notes
+    await db.commit()
+    await db.refresh(feedback)
+    return feedback
+
+
 # ================= BLOCKED IPS CRUD =================
 
 async def block_ip_db(
@@ -140,6 +202,31 @@ async def block_ip_db(
         await db.commit()
         await db.refresh(blocked_ip)
         return blocked_ip
+
+
+async def record_ip_offense(db: AsyncSession, ip: str) -> IPOffenseHistoryModel:
+    now = time.time()
+    stmt = select(IPOffenseHistoryModel).where(IPOffenseHistoryModel.ip == ip)
+    res = await db.execute(stmt)
+    existing = res.scalar_one_or_none()
+
+    if existing:
+        existing.last_offense_at = now
+        existing.strike_count = int(existing.strike_count or 0) + 1
+        await db.commit()
+        await db.refresh(existing)
+        return existing
+
+    offense = IPOffenseHistoryModel(
+        ip=ip,
+        first_offense_at=now,
+        last_offense_at=now,
+        strike_count=1,
+    )
+    db.add(offense)
+    await db.commit()
+    await db.refresh(offense)
+    return offense
 
 
 async def unblock_ip_db(db: AsyncSession, ip: str) -> bool:
@@ -230,6 +317,29 @@ async def get_custom_signature_rules(db: AsyncSession) -> List[SignatureRuleMode
     stmt = select(SignatureRuleModel).where(SignatureRuleModel.is_enabled == 1)
     res = await db.execute(stmt)
     return list(res.scalars().all())
+
+
+# ================= CONFIG HISTORY / AUDIT =================
+
+async def create_config_history_entries(
+    db: AsyncSession,
+    changes: Dict[str, Tuple[Any, Any]],
+    changed_by: str = "system",
+) -> int:
+    count = 0
+    for key, (old_value, new_value) in changes.items():
+        entry = ConfigHistoryModel(
+            changed_at=time.time(),
+            changed_by=changed_by,
+            config_key=key,
+            old_value=json.dumps(old_value, default=str),
+            new_value=json.dumps(new_value, default=str),
+        )
+        db.add(entry)
+        count += 1
+    if count:
+        await db.commit()
+    return count
 
 
 # ================= RETENTION CLEANUP =================

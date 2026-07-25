@@ -1,8 +1,8 @@
 [Unit]
 Description=SAGEDRAL-ML Network Intrusion Detection and Prevention System
 Documentation=https://github.com/your-repo/sagedral-ml
-After=network.target
-Wants=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -10,16 +10,20 @@ User=root
 Group=root
 WorkingDirectory=/var/lib/sagedral-ml
 ExecStartPre=/usr/local/bin/sagedral-ml config validate
-ExecStart=/usr/local/bin/sagedral-ml start --daemon
+ExecStart=/usr/local/bin/sagedral-ml start
 ExecStop=/usr/local/bin/sagedral-ml stop
 Restart=on-failure
-RestartSec=15
+RestartSec=10
+RestartPreventExitStatus=255
+TimeoutStartSec=90
 TimeoutStopSec=30
+WatchdogSec=120
 NoNewPrivileges=no
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=sagedral-ml
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target

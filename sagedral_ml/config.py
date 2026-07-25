@@ -6,10 +6,12 @@ validates config schemas, and exports default config templates.
 
 import os
 import sys
+import shutil
 import logging
+import copy
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import tomli as _tomli
 
@@ -38,10 +40,12 @@ DEFAULT_CONFIG_DICT: Dict[str, Any] = {
     "feature_extraction": {
         "flow_timeout": 60,
         "max_packets_per_flow": 1000,
+        "max_active_flows": 50000,
     },
     "signature": {
         "enabled": True,
         "custom_rules_file": "",
+        "custom_rules_dir": "/var/lib/sagedral-ml/custom-rules",
         "disabled_rules": [],
     },
     "ml": {
@@ -73,6 +77,18 @@ DEFAULT_CONFIG_DICT: Dict[str, Any] = {
         "path": "/var/lib/sagedral-ml/sagedral.db",
         "retention_days_alerts": 30,
         "retention_days_traffic": 7,
+        "backup_dir": "/var/lib/sagedral-ml/backups",
+        "backup_interval_hours": 24,
+        "backup_retention_days": 30,
+    },
+    "auth": {
+        "secret_key": "",
+        "access_token_expire_minutes": 480,
+        "algorithm": "HS256",
+        "default_admin_username": "admin",
+        "default_admin_password": "",
+        "default_admin_email": "admin@sagedral.local",
+        "admin_secret_file": "/var/lib/sagedral-ml/.sagedral-admin-secret",
     },
 }
 
@@ -105,10 +121,12 @@ queue_maxsize = 10000
 [feature_extraction]
 flow_timeout = 60                       # Seconds before flow is considered completed
 max_packets_per_flow = 1000            # Max packets per flow
+max_active_flows = 50000               # Safety cap against high-cardinality flow exhaustion
 
 [signature]
 enabled = true
 custom_rules_file = ""                  # Optional path to custom Python rules file
+custom_rules_dir = "/var/lib/sagedral-ml/custom-rules"  # Whitelisted directory for custom rule files
 disabled_rules = []                     # List of rule IDs to disable (e.g. ["SIG-002"])
 
 [ml]
@@ -143,18 +161,76 @@ cors_origins = ["http://localhost:5173", "http://localhost:3000"]
 path = "/var/lib/sagedral-ml/sagedral.db"
 retention_days_alerts = 30
 retention_days_traffic = 7
+backup_dir = "/var/lib/sagedral-ml/backups"
+backup_interval_hours = 24
+backup_retention_days = 30
+
+[auth]
+secret_key = ""                       # "" = auto-generate random on first startup (set persistent secret for production).
+access_token_expire_minutes = 480    # 8 jam
+algorithm = "HS256"
+default_admin_username = "admin"
+default_admin_password = ""           # "" = generate random first-admin password and write admin_secret_file.
+default_admin_email = "admin@sagedral.local"
+admin_secret_file = "/var/lib/sagedral-ml/.sagedral-admin-secret"
 """
 
 
 class Config:
     """System configuration container."""
 
+    requires_restart_keys: List[str] = [
+        "capture.interface",
+        "capture.bpf_filter",
+        "capture.promiscuous",
+        "capture.queue_maxsize",
+        "feature_extraction.flow_timeout",
+        "feature_extraction.max_packets_per_flow",
+        "feature_extraction.max_active_flows",
+        "signature.enabled",
+        "signature.custom_rules_file",
+        "signature.custom_rules_dir",
+        "signature.disabled_rules",
+        "ml.enabled",
+        "ml.anomaly_threshold",
+        "ml.classifier_threshold",
+        "ml.model_dir",
+        "ml.retrain_on_startup",
+        "decision.weight_signature",
+        "decision.weight_ml",
+        "ips.enabled",
+        "ips.preferred_backend",
+        "ips.auto_unblock_after",
+        "ips.whitelist",
+        "api.host",
+        "api.port",
+        "api.cors_origins",
+        "database.path",
+        "database.retention_days_alerts",
+        "database.retention_days_traffic",
+        "database.backup_dir",
+        "database.backup_interval_hours",
+        "database.backup_retention_days",
+        "general.log_level",
+        "general.log_file",
+        "general.data_dir",
+    ]
+
     def __init__(self, data: Dict[str, Any]):
         self._data = data
+        self._last_loaded_path: Optional[str] = None
 
     @property
     def data(self) -> Dict[str, Any]:
         return self._data
+
+    @property
+    def last_loaded_path(self) -> Optional[str]:
+        return self._last_loaded_path
+
+    @last_loaded_path.setter
+    def last_loaded_path(self, value: Optional[str]) -> None:
+        self._last_loaded_path = value
 
     def get(self, section: str, key: Any = None, default: Any = None) -> Any:
         if key is None:
@@ -173,22 +249,34 @@ class Config:
         """Validate configuration values and return list of validation error messages."""
         errors = []
         capture_iface = self.get("capture", "interface", "")
-        if not capture_iface:
-            errors.append("capture.interface required and cannot be empty")
+        if capture_iface is not None and not isinstance(capture_iface, str):
+            errors.append("capture.interface must be a string; use empty string for auto-detect")
 
         anomaly_th = self.get("ml", "anomaly_threshold", 0.7)
-        if not (0.0 <= float(anomaly_th) <= 1.0):
+        try:
+            anomaly_th_float = float(anomaly_th)
+        except (TypeError, ValueError):
+            anomaly_th_float = -1.0
+        if not (0.0 <= anomaly_th_float <= 1.0):
             errors.append("ml.anomaly_threshold must be between 0.0 and 1.0")
 
         block_th = self.get("decision", "block_threshold", 0.7)
-        if not (0.0 <= float(block_th) <= 1.0):
+        try:
+            block_th_float = float(block_th)
+        except (TypeError, ValueError):
+            block_th_float = -1.0
+        if not (0.0 <= block_th_float <= 1.0):
             errors.append("decision.block_threshold must be between 0.0 and 1.0")
 
         alert_th = self.get("decision", "alert_threshold", 0.5)
-        if not (0.0 <= float(alert_th) <= 1.0):
+        try:
+            alert_th_float = float(alert_th)
+        except (TypeError, ValueError):
+            alert_th_float = -1.0
+        if not (0.0 <= alert_th_float <= 1.0):
             errors.append("decision.alert_threshold must be between 0.0 and 1.0")
 
-        if float(alert_th) > float(block_th):
+        if 0.0 <= alert_th_float <= 1.0 and 0.0 <= block_th_float <= 1.0 and alert_th_float > block_th_float:
             errors.append("decision.alert_threshold cannot be greater than decision.block_threshold")
 
         backend = self.get("ips", "preferred_backend", "nftables")
@@ -196,6 +284,74 @@ class Config:
             errors.append("ips.preferred_backend must be 'nftables' or 'iptables'")
 
         return errors
+
+    def save(self, path: Optional[str] = None) -> bool:
+        target_path = path or self._last_loaded_path
+        if not target_path:
+            logger.error("Cannot save config: no path specified and no last_loaded_path available.")
+            return False
+
+        target = Path(target_path)
+        backup_path = target.with_suffix(target.suffix + ".bak")
+        target_dir = target.parent
+        try:
+            if target_dir and not target_dir.exists():
+                target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.error(f"Failed to create config directory {target_dir}: {e}")
+            return False
+
+        backup_created = False
+        if target.exists():
+            try:
+                shutil.copy2(target, backup_path)
+                backup_created = True
+                logger.debug(f"Created config backup at {backup_path}")
+            except Exception as e:
+                logger.error(f"Failed to create config backup: {e}")
+                return False
+
+        try:
+            with open(target, "wb") as f:
+                tomli_w.dump(self._data, f)
+            logger.info(f"Configuration saved successfully to {target}")
+            self._last_loaded_path = str(target)
+            if backup_created:
+                try:
+                    backup_path.unlink()
+                except Exception:
+                    pass
+            return True
+        except Exception as e:
+            logger.error(f"Failed to write config to {target}: {e}")
+            if backup_created:
+                try:
+                    shutil.copy2(backup_path, target)
+                    logger.info(f"Rolled back config from backup {backup_path}")
+                except Exception as rollback_err:
+                    logger.error(f"Rollback failed: {rollback_err}")
+            return False
+
+    def _flatten_dict(self, d: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
+        flat: Dict[str, Any] = {}
+        for k, v in d.items():
+            full_key = f"{prefix}.{k}" if prefix else k
+            if isinstance(v, dict):
+                flat.update(self._flatten_dict(v, full_key))
+            else:
+                flat[full_key] = v
+        return flat
+
+    def get_changed_restart_keys(self, other_data: Dict[str, Any]) -> List[str]:
+        current_flat = self._flatten_dict(self._data)
+        other_flat = self._flatten_dict(other_data)
+        changed: List[str] = []
+        for key in self.requires_restart_keys:
+            cur_val = current_flat.get(key)
+            other_val = other_flat.get(key)
+            if cur_val != other_val:
+                changed.append(key)
+        return changed
 
 
 _config_instance: Optional[Config] = None
@@ -268,6 +424,8 @@ def load_config(custom_path: Optional[str] = None) -> Config:
                         config_dict[sec][key] = val
 
     _config_instance = Config(config_dict)
+    if config_file_path:
+        _config_instance.last_loaded_path = str(config_file_path)
     return _config_instance
 
 

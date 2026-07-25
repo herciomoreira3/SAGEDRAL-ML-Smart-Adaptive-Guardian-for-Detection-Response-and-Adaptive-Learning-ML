@@ -9,7 +9,7 @@ from sagedral_ml.config import Config, load_config, get_config, DEFAULT_CONFIG_D
 
 def test_default_config_loading():
     config = load_config()
-    assert config.get("capture", "interface") == "eth0"
+    assert config.get("capture", "interface") == ""
     assert config.get("decision", "block_threshold") == 0.7
     assert config.get("ips", "preferred_backend") == "nftables"
 

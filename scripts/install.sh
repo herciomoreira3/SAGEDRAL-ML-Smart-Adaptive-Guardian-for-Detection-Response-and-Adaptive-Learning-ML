@@ -110,23 +110,37 @@ else
     info "If failure persists, run: sudo apt-get install -y build-essential libgomp1 && sudo sagedral-ml model init --force"
 fi
 
-# 12. Install systemd service
+# 12. Install systemd service + logrotate
 info "Installing systemd service..."
-cat > /etc/systemd/system/sagedral-ml.service << 'EOF'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${SCRIPT_DIR}/../systemd/sagedral-ml.service" ]]; then
+    cp "${SCRIPT_DIR}/../systemd/sagedral-ml.service" /etc/systemd/system/sagedral-ml.service
+else
+    cat > /etc/systemd/system/sagedral-ml.service << 'EOF'
 [Unit]
 Description=SAGEDRAL-ML Network Intrusion Detection and Prevention System
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/sagedral-ml start
 Restart=on-failure
 RestartSec=10
+WatchdogSec=120
 User=root
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
 EOF
+fi
+
+info "Installing logrotate configuration..."
+if [[ -f "${SCRIPT_DIR}/logrotate.conf" ]]; then
+    cp "${SCRIPT_DIR}/logrotate.conf" /etc/logrotate.d/sagedral-ml
+    info "Logrotate config installed at /etc/logrotate.d/sagedral-ml"
+fi
 
 if [ -d /run/systemd/system ] && systemctl is-system-running &>/dev/null; then
     systemctl daemon-reload 2>/dev/null || true

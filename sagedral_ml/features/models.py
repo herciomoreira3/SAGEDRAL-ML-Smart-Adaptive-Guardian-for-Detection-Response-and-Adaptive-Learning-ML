@@ -5,8 +5,31 @@ Generates 28 statistical numerical features for LightGBM and Signature detection
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Any
-import numpy as np
+from typing import Dict, Any
+import math
+
+
+@dataclass
+class RunningStat:
+    """Online mean/std calculator using Welford's algorithm."""
+    n: int = 0
+    mean: float = 0.0
+    m2: float = 0.0
+
+    def update(self, value: float) -> None:
+        self.n += 1
+        delta = float(value) - self.mean
+        self.mean += delta / self.n
+        delta2 = float(value) - self.mean
+        self.m2 += delta * delta2
+
+    @property
+    def variance(self) -> float:
+        return self.m2 / self.n if self.n > 0 else 0.0
+
+    @property
+    def std(self) -> float:
+        return math.sqrt(max(self.variance, 0.0))
 
 
 @dataclass
@@ -30,10 +53,10 @@ class FlowRecord:
     total_fwd_bytes: int = 0
     total_bwd_bytes: int = 0
 
-    fwd_packet_lengths: List[int] = field(default_factory=list)
-    bwd_packet_lengths: List[int] = field(default_factory=list)
-    fwd_iat_list: List[float] = field(default_factory=list)
-    bwd_iat_list: List[float] = field(default_factory=list)
+    fwd_packet_lengths: RunningStat = field(default_factory=RunningStat)
+    bwd_packet_lengths: RunningStat = field(default_factory=RunningStat)
+    fwd_iat_list: RunningStat = field(default_factory=RunningStat)
+    bwd_iat_list: RunningStat = field(default_factory=RunningStat)
 
     syn_flag_count: int = 0
     fin_flag_count: int = 0
@@ -51,22 +74,22 @@ class FlowRecord:
         if is_forward:
             self.total_fwd_packets += 1
             self.total_fwd_bytes += pkt_len
-            self.fwd_packet_lengths.append(pkt_len)
+            self.fwd_packet_lengths.update(pkt_len)
             self.fwd_header_len += header_len
 
             if self.last_fwd_time > 0.0:
                 iat = max(timestamp - self.last_fwd_time, 0.0)
-                self.fwd_iat_list.append(iat)
+                self.fwd_iat_list.update(iat)
             self.last_fwd_time = timestamp
         else:
             self.total_bwd_packets += 1
             self.total_bwd_bytes += pkt_len
-            self.bwd_packet_lengths.append(pkt_len)
+            self.bwd_packet_lengths.update(pkt_len)
             self.bwd_header_len += header_len
 
             if self.last_bwd_time > 0.0:
                 iat = max(timestamp - self.last_bwd_time, 0.0)
-                self.bwd_iat_list.append(iat)
+                self.bwd_iat_list.update(iat)
             self.last_bwd_time = timestamp
 
         if flags:
@@ -84,25 +107,20 @@ class FlowRecord:
         """
         duration = max(self.end_time - self.start_time, 1e-6)
 
-        fwd_lens = self.fwd_packet_lengths if self.fwd_packet_lengths else [0]
-        bwd_lens = self.bwd_packet_lengths if self.bwd_packet_lengths else [0]
-        fwd_iats = self.fwd_iat_list if self.fwd_iat_list else [0.0]
-        bwd_iats = self.bwd_iat_list if self.bwd_iat_list else [0.0]
-
         total_bytes = self.total_fwd_bytes + self.total_bwd_bytes
         total_pkts = self.total_fwd_packets + self.total_bwd_packets
 
-        fwd_len_mean = float(np.mean(fwd_lens))
-        fwd_len_std = float(np.std(fwd_lens)) if len(fwd_lens) > 1 else 0.0
+        fwd_len_mean = float(self.fwd_packet_lengths.mean)
+        fwd_len_std = float(self.fwd_packet_lengths.std)
 
-        bwd_len_mean = float(np.mean(bwd_lens))
-        bwd_len_std = float(np.std(bwd_lens)) if len(bwd_lens) > 1 else 0.0
+        bwd_len_mean = float(self.bwd_packet_lengths.mean)
+        bwd_len_std = float(self.bwd_packet_lengths.std)
 
-        fwd_iat_mean = float(np.mean(fwd_iats))
-        fwd_iat_std = float(np.std(fwd_iats)) if len(fwd_iats) > 1 else 0.0
+        fwd_iat_mean = float(self.fwd_iat_list.mean)
+        fwd_iat_std = float(self.fwd_iat_list.std)
 
-        bwd_iat_mean = float(np.mean(bwd_iats))
-        bwd_iat_std = float(np.std(bwd_iats)) if len(bwd_iats) > 1 else 0.0
+        bwd_iat_mean = float(self.bwd_iat_list.mean)
+        bwd_iat_std = float(self.bwd_iat_list.std)
 
         down_up_ratio = float(self.total_bwd_bytes) / float(max(self.total_fwd_bytes, 1))
 
