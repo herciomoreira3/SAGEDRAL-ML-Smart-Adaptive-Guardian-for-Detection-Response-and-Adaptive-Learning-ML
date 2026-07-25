@@ -9,13 +9,21 @@ from sagedral_ml.database.connection import get_db
 from sagedral_ml.database import crud
 from sagedral_ml.api.schemas.config import RuleCreateRequest
 
+
+def _pydantic_dump(model_instance):
+    """Compatibility helper: Pydantic v2 uses .model_dump(), v1 uses .dict()."""
+    if hasattr(model_instance, "model_dump"):
+        return model_instance.model_dump()
+    return model_instance.dict()
+
+
 router = APIRouter(prefix="/api/v1/rules", tags=["Signature Rules"])
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_custom_rule(req: RuleCreateRequest, db: AsyncSession = Depends(get_db)):
     try:
-        rule = await crud.create_signature_rule(db, req.model_dump())
+        rule = await crud.create_signature_rule(db, _pydantic_dump(req))
         return {"success": True, "message": f"Rule '{rule.rule_id}' created.", "rule": rule.to_dict()}
     except Exception as e:
         raise HTTPException(

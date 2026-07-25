@@ -11,10 +11,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
+import tomli as _tomli
 
 import tomli_w
 
@@ -231,7 +228,7 @@ def load_config(custom_path: Optional[str] = None) -> Config:
     if config_file_path and config_file_path.exists():
         try:
             with open(config_file_path, "rb") as f:
-                loaded = tomllib.load(f)
+                loaded = _tomli.load(f)
                 _deep_update(config_dict, loaded)
                 logger.info(f"Loaded configuration from {config_file_path}")
         except Exception as e:
