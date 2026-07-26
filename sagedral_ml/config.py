@@ -658,25 +658,61 @@ def load_config(custom_path: Optional[str] = None) -> Config:
     )
 
     config_file_path: Optional[Path] = None
+    environment_path = os.environ.get("SAGEDRAL_CONFIG_PATH", "").strip()
+    require_existing_path = False
 
     if custom_path:
         config_file_path = Path(custom_path)
-    elif USER_CONFIG_PATH.exists():
-        config_file_path = USER_CONFIG_PATH
-    elif DEFAULT_CONFIG_PATH.exists():
-        config_file_path = DEFAULT_CONFIG_PATH
+    elif environment_path:
+        # Services must not depend on whichever HOME systemd happens to
+        # provide.  An explicit path is also safer than silently falling back
+        # to defaults when a production config is unreadable.
+        config_file_path = Path(environment_path)
+        require_existing_path = True
+    else:
+        for candidate in (USER_CONFIG_PATH, DEFAULT_CONFIG_PATH):
+            try:
+                if candidate.exists():
+                    config_file_path = candidate
+                    break
+            except OSError as exc:
+                raise ConfigError(
+                    "Cannot inspect configuration path %s: %s"
+                    % (candidate, exc)
+                )
 
-    if config_file_path and config_file_path.exists():
+    config_path_exists = False
+    if config_file_path is not None:
+        try:
+            config_path_exists = config_file_path.exists()
+        except OSError as exc:
+            raise ConfigError(
+                "Cannot inspect configuration path %s: %s"
+                % (config_file_path, exc)
+            )
+
+    if require_existing_path and not config_path_exists:
+        raise ConfigError(
+            "Configured SAGEDRAL_CONFIG_PATH does not exist: %s"
+            % config_file_path
+        )
+
+    if config_file_path and config_path_exists:
         try:
             with open(config_file_path, "rb") as f:
                 loaded = _tomli.load(f)
                 _deep_update(config_dict, loaded)
                 logger.info(f"Loaded configuration from {config_file_path}")
         except Exception as e:
-            logger.warning(f"Failed to load config file {config_file_path}: {e}")
+            raise ConfigError(
+                "Cannot read configuration file %s: %s"
+                % (config_file_path, e)
+            )
 
     # Override with Environment Variables: SAGEDRAL_<SECTION>_<KEY>=value
     for env_var, val in os.environ.items():
+        if env_var == "SAGEDRAL_CONFIG_PATH":
+            continue
         if env_var.startswith("SAGEDRAL_"):
             parts = env_var[9:].lower().split("_", 1)
             if len(parts) == 2:

@@ -10,6 +10,10 @@ NotifyAccess=main
 User=sagedral
 Group=sagedral
 WorkingDirectory=/var/lib/sagedral-ml
+UMask=0027
+Environment=HOME=/var/lib/sagedral-ml
+Environment=SAGEDRAL_CONFIG_PATH=/etc/sagedral/config.toml
+Environment=PYTHONUNBUFFERED=1
 ExecStartPre=/usr/local/bin/sagedral-ml config validate
 ExecStart=/usr/local/bin/sagedral-ml start --no-daemon
 Restart=on-failure
@@ -36,7 +40,6 @@ ReadWritePaths=/etc/sagedral /var/lib/sagedral-ml /var/log/sagedral-ml.log
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=sagedral-ml
-Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target

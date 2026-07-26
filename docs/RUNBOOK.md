@@ -13,6 +13,49 @@ sagedral-ml backup list
 Periksa capture running, packet/kernel drop, backlog alert, block aktif,
 drift PSI, ruang filesystem, kegagalan SIEM/notifikasi, dan sinkronisasi HA.
 
+## Service gagal pada `ExecStartPre`
+
+Jika journal menampilkan `Validation error: [Errno 13] Permission denied`,
+pulihkan ownership instalasi dan pasang ulang unit terbaru:
+
+```bash
+sudo install -d -o root -g sagedral -m 2770 /etc/sagedral
+sudo chown root:sagedral /etc/sagedral/config.toml
+sudo chmod 0660 /etc/sagedral/config.toml
+
+sudo install -d -o sagedral -g sagedral -m 0750 \
+  /var/lib/sagedral-ml \
+  /var/lib/sagedral-ml/models \
+  /var/lib/sagedral-ml/backups \
+  /var/lib/sagedral-ml/custom-rules
+sudo chown -R sagedral:sagedral /var/lib/sagedral-ml
+sudo touch /var/log/sagedral-ml.log
+sudo chown sagedral:sagedral /var/log/sagedral-ml.log
+sudo chmod 0640 /var/log/sagedral-ml.log
+
+sudo install -o root -g root -m 0644 \
+  systemd/sagedral-ml.service \
+  /etc/systemd/system/sagedral-ml.service
+sudo systemctl daemon-reload
+```
+
+Jalankan preflight persis sebagai identity service sebelum restart:
+
+```bash
+sudo -u sagedral env \
+  HOME=/var/lib/sagedral-ml \
+  SAGEDRAL_CONFIG_PATH=/etc/sagedral/config.toml \
+  /usr/local/bin/sagedral-ml config validate
+sudo systemctl restart sagedral-ml
+sudo systemctl status sagedral-ml --no-pager -l
+sudo journalctl -u sagedral-ml -n 100 --no-pager -o cat
+```
+
+Jika masih gagal, `namei -l /etc/sagedral/config.toml` dan
+`namei -l /var/lib/sagedral-ml` akan menunjukkan komponen path yang tidak
+dapat diakses. Jangan mengubah service kembali menjadi `root`; perbaiki
+ownership path yang disebut journal.
+
 ## Respons insiden
 
 1. Jangan menghapus alert sebelum export CSV dan snapshot audit.

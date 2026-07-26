@@ -87,11 +87,14 @@ info "Creating directories..."
 if ! id -u sagedral &>/dev/null; then
     useradd --system --home-dir /var/lib/sagedral-ml --shell /usr/sbin/nologin sagedral
 fi
-mkdir -p /var/lib/sagedral-ml/models
-mkdir -p /var/lib/sagedral-ml/backups
-mkdir -p /var/lib/sagedral-ml/custom-rules
-mkdir -p /etc/sagedral
-mkdir -p /var/log
+install -d -o sagedral -g sagedral -m 0750 /var/lib/sagedral-ml
+install -d -o sagedral -g sagedral -m 0750 /var/lib/sagedral-ml/models
+install -d -o sagedral -g sagedral -m 0750 /var/lib/sagedral-ml/backups
+install -d -o sagedral -g sagedral -m 0750 /var/lib/sagedral-ml/custom-rules
+# The service persists dashboard config changes by creating a temporary
+# backup next to config.toml.  The setgid directory keeps those files in the
+# sagedral group while preventing access by unrelated users.
+install -d -o root -g sagedral -m 2770 /etc/sagedral
 touch /var/log/sagedral-ml.log
 chown -R sagedral:sagedral /var/lib/sagedral-ml
 chown sagedral:sagedral /var/log/sagedral-ml.log
@@ -105,6 +108,11 @@ if [[ ! -f /etc/sagedral/config.toml ]]; then
     chmod 0660 /etc/sagedral/config.toml
     info "Created default config at /etc/sagedral/config.toml"
 fi
+# Repair ownership/modes as well when upgrading an existing installation.
+chown root:sagedral /etc/sagedral/config.toml
+chmod 0660 /etc/sagedral/config.toml
+chown root:sagedral /etc/sagedral
+chmod 2770 /etc/sagedral
 
 # 10. Initialize nftables table
 info "Initializing nftables sagedral table..."
@@ -135,13 +143,26 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
-ExecStart=/usr/local/bin/sagedral-ml start
+Type=notify
+NotifyAccess=main
+User=sagedral
+Group=sagedral
+WorkingDirectory=/var/lib/sagedral-ml
+UMask=0027
+Environment=HOME=/var/lib/sagedral-ml
+Environment=SAGEDRAL_CONFIG_PATH=/etc/sagedral/config.toml
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/usr/local/bin/sagedral-ml config validate
+ExecStart=/usr/local/bin/sagedral-ml start --no-daemon
 Restart=on-failure
 RestartSec=10
-WatchdogSec=120
-User=root
-Environment=PYTHONUNBUFFERED=1
+WatchdogSec=60
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/sagedral /var/lib/sagedral-ml /var/log/sagedral-ml.log
 
 [Install]
 WantedBy=multi-user.target

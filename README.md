@@ -20,6 +20,10 @@ sudo bash scripts/install.sh
 Installer membuat user non-root `sagedral`, direktori data, konfigurasi,
 fallback model, service systemd, dan logrotate. Service memperoleh hanya
 `CAP_NET_RAW` dan `CAP_NET_ADMIN`; ia tidak berjalan sebagai root.
+Lokasi config service dikunci ke `/etc/sagedral/config.toml` dan installer
+memperbaiki ownership instalasi lama secara idempoten. Untuk error permission
+di `ExecStartPre`, gunakan prosedur recovery di
+[runbook](docs/RUNBOOK.md#service-gagal-pada-execstartpre).
 
 Password admin pertama dibuat acak dan disimpan dengan mode `0600`:
 

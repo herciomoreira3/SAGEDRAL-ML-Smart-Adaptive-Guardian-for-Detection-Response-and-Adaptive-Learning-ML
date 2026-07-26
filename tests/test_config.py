@@ -3,8 +3,16 @@ Unit tests for sagedral_ml.config module.
 """
 
 import os
+from pathlib import Path
+
 import pytest
-from sagedral_ml.config import Config, load_config, get_config, DEFAULT_CONFIG_DICT
+from sagedral_ml.config import (
+    Config,
+    ConfigError,
+    load_config,
+    get_config,
+    DEFAULT_CONFIG_DICT,
+)
 import sagedral_ml.config as config_module
 
 
@@ -34,6 +42,28 @@ def test_env_var_override(monkeypatch):
     assert config.get("ips", "enabled") is False
 
 
+def test_explicit_service_config_path(monkeypatch, tmp_path):
+    config_path = tmp_path / "service-config.toml"
+    config_path.write_text(
+        '[capture]\ninterface = "enp0s8"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SAGEDRAL_CONFIG_PATH", str(config_path))
+
+    config = load_config()
+
+    assert config.get("capture", "interface") == "enp0s8"
+    assert config.last_loaded_path == str(config_path)
+
+
+def test_missing_explicit_service_config_fails_clearly(monkeypatch, tmp_path):
+    missing_path = tmp_path / "missing.toml"
+    monkeypatch.setenv("SAGEDRAL_CONFIG_PATH", str(missing_path))
+
+    with pytest.raises(ConfigError, match="SAGEDRAL_CONFIG_PATH does not exist"):
+        load_config()
+
+
 def test_config_validation():
     bad_data = {
         "capture": {"interface": ""},
@@ -51,3 +81,27 @@ def test_section_get():
     assert isinstance(config.get("feature_extraction"), dict)
     assert config.get("feature_extraction", {}) == {"flow_timeout": 60}
     assert config.get("non_existent", {}) == {}
+
+
+def test_systemd_service_has_deterministic_runtime_paths():
+    root = Path(__file__).resolve().parents[1]
+    service = (root / "systemd" / "sagedral-ml.service").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Environment=HOME=/var/lib/sagedral-ml" in service
+    assert (
+        "Environment=SAGEDRAL_CONFIG_PATH=/etc/sagedral/config.toml"
+        in service
+    )
+    assert "User=sagedral" in service
+    assert "ReadWritePaths=/etc/sagedral /var/lib/sagedral-ml" in service
+
+
+def test_installer_repairs_service_permissions():
+    root = Path(__file__).resolve().parents[1]
+    installer = (root / "scripts" / "install.sh").read_text(encoding="utf-8")
+
+    assert "chmod 2770 /etc/sagedral" in installer
+    assert "chown root:sagedral /etc/sagedral/config.toml" in installer
+    assert "chown -R sagedral:sagedral /var/lib/sagedral-ml" in installer

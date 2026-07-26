@@ -20,6 +20,8 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
 
 FROM python:3.8.10-slim-buster
 ENV PYTHONUNBUFFERED=1 \
+    HOME=/var/lib/sagedral-ml \
+    SAGEDRAL_CONFIG_PATH=/etc/sagedral/config.toml \
     SAGEDRAL_GENERAL_DATA_DIR=/var/lib/sagedral-ml
 RUN sed -i 's|deb.debian.org/debian|archive.debian.org/debian|g; s|security.debian.org/debian-security|archive.debian.org/debian-security|g; /buster-updates/d' /etc/apt/sources.list && \
     apt-get -o Acquire::Check-Valid-Until=false update && apt-get install -y --no-install-recommends \

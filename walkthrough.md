@@ -41,10 +41,18 @@ port = 8000
 Validasi dan restart:
 
 ```bash
-sudo -u sagedral sagedral-ml config validate
+sudo -u sagedral env \
+  HOME=/var/lib/sagedral-ml \
+  SAGEDRAL_CONFIG_PATH=/etc/sagedral/config.toml \
+  sagedral-ml config validate
 sudo systemctl restart sagedral-ml
 sudo journalctl -u sagedral-ml -f
 ```
+
+Jika service berhenti di `ExecStartPre` dengan `Permission denied`, ikuti
+bagian **Service gagal pada ExecStartPre** di `docs/RUNBOOK.md`. Unit systemd
+menetapkan `HOME` dan `SAGEDRAL_CONFIG_PATH` secara eksplisit agar hasilnya
+tidak bergantung pada environment shell/root saat instalasi.
 
 Untuk throughput tinggi, `af_packet` menggunakan TPACKET_V2
 `PACKET_RX_RING` mmap dan memasang BPF melalui `tcpdump -ddd`. Pantau
