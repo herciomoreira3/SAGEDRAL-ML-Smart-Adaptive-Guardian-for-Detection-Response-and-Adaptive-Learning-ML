@@ -5,6 +5,15 @@ Unit tests for sagedral_ml.config module.
 import os
 import pytest
 from sagedral_ml.config import Config, load_config, get_config, DEFAULT_CONFIG_DICT
+import sagedral_ml.config as config_module
+
+
+@pytest.fixture(autouse=True)
+def preserve_global_config():
+    """Unit config loads must not replace the session-wide API test config."""
+    previous = config_module._config_instance
+    yield
+    config_module._config_instance = previous
 
 
 def test_default_config_loading():

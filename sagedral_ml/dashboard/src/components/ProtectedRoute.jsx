@@ -12,4 +12,17 @@ export function ProtectedRoute({ children }) {
   return children;
 }
 
+export function RoleRoute({ roles, children }) {
+  let user = {};
+  try {
+    user = JSON.parse(localStorage.getItem('sagedral_user') || '{}');
+  } catch {
+    user = {};
+  }
+  if (!roles.includes(user.role)) {
+    return <Navigate to="/" replace />;
+  }
+  return children;
+}
+
 export default ProtectedRoute;

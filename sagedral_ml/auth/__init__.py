@@ -12,6 +12,7 @@ from sagedral_ml.auth.security import (
     require_roles,
     seed_default_admin,
     get_jwt_secret_key,
+    require_permission,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "require_roles",
     "seed_default_admin",
     "get_jwt_secret_key",
+    "require_permission",
 ]

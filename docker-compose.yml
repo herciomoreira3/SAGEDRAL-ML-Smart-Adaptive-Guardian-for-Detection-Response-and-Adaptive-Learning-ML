@@ -1,0 +1,34 @@
+services:
+  sagedral:
+    build: .
+    image: sagedral-ml:1.0.0
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - sagedral_config:/etc/sagedral
+      - sagedral_data:/var/lib/sagedral-ml
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    network_mode: host
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/sagedral-alerts.yml:/etc/prometheus/sagedral-alerts.yml:ro
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    network_mode: host
+    volumes:
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped
+
+volumes:
+  sagedral_config:
+  sagedral_data:
+  prometheus_data:
+  grafana_data:

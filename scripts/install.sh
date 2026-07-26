@@ -84,13 +84,25 @@ fi
 
 # 8. Create directories
 info "Creating directories..."
+if ! id -u sagedral &>/dev/null; then
+    useradd --system --home-dir /var/lib/sagedral-ml --shell /usr/sbin/nologin sagedral
+fi
 mkdir -p /var/lib/sagedral-ml/models
+mkdir -p /var/lib/sagedral-ml/backups
+mkdir -p /var/lib/sagedral-ml/custom-rules
 mkdir -p /etc/sagedral
 mkdir -p /var/log
+touch /var/log/sagedral-ml.log
+chown -R sagedral:sagedral /var/lib/sagedral-ml
+chown sagedral:sagedral /var/log/sagedral-ml.log
+chmod 0750 /var/lib/sagedral-ml
+chmod 0640 /var/log/sagedral-ml.log
 
 # 9. Config template
 if [[ ! -f /etc/sagedral/config.toml ]]; then
     sagedral-ml config template > /etc/sagedral/config.toml
+    chown root:sagedral /etc/sagedral/config.toml
+    chmod 0660 /etc/sagedral/config.toml
     info "Created default config at /etc/sagedral/config.toml"
 fi
 
@@ -103,7 +115,7 @@ nft add rule inet sagedral input ip saddr @blocklist drop 2>/dev/null || true
 
 # 11. ML Model initialization (CRITICAL — generates fallback models so ML Model Loaded = True on first start)
 info "Initializing ML detection models (rule-based fallback if LightGBM can't compile yet)..."
-if sagedral-ml model init; then
+if runuser -u sagedral -- sagedral-ml model init; then
     info "ML models initialized successfully."
 else
     warn "ML model init returned non-zero. Service will generate fallbacks on first startup."

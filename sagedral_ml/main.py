@@ -29,26 +29,63 @@ import asyncio
 import ipaddress
 import re
 import subprocess
+import os
+import socket
 from typing import List, Optional
 import uvicorn
 
 from sagedral_ml.config import get_config
-from sagedral_ml.capture.sniffer import PacketCapture
+from sagedral_ml.capture.sniffer import create_packet_capture
 from sagedral_ml.features.extractor import FlowAggregator
 from sagedral_ml.detection.signature_engine import SignatureEngine
 from sagedral_ml.detection.ml_engine import MLEngine
 from sagedral_ml.detection.decision_engine import DecisionEngine
-from sagedral_ml.ips.response import IPSModule
+from sagedral_ml.ips.response import (
+    IPSModule,
+    ConnectionRateLimiter,
+    calculate_escalated_duration,
+)
 from sagedral_ml.ips.models import AlertEvent
 import sagedral_ml.database.connection as _db_conn
 from sagedral_ml.database import crud
 from sagedral_ml.api.main import app
 from sagedral_ml.api.websocket import ws_manager
 from sagedral_ml.core.container import global_container
+from sagedral_ml.integrations import (
+    geoip_resolver,
+    notification_manager,
+    siem_exporter,
+)
+from sagedral_ml.observability import metrics
 
 logger = logging.getLogger("sagedral_ml.main")
 
 stop_event = threading.Event()
+
+
+def _systemd_notify(message: str) -> bool:
+    """Send sd_notify datagram without requiring python-systemd."""
+    notify_socket = os.environ.get("NOTIFY_SOCKET")
+    if not notify_socket:
+        return False
+    address = notify_socket
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
+            client.connect(address)
+            client.sendall(message.encode("utf-8"))
+        return True
+    except Exception as exc:
+        logger.debug("systemd notify failed: %s", exc)
+        return False
+
+
+def _systemd_watchdog_worker(stop_event_ref: threading.Event) -> None:
+    watchdog_usec = int(os.environ.get("WATCHDOG_USEC", "0") or 0)
+    interval = max(1.0, watchdog_usec / 2_000_000.0) if watchdog_usec else 30.0
+    while not stop_event_ref.wait(interval):
+        _systemd_notify("WATCHDOG=1")
 
 
 def _auto_detect_capture_interface(explicit: Optional[str]) -> str:
@@ -148,6 +185,17 @@ def processing_worker(
     executes IPS block actions, persists alerts to SQLite, and broadcasts via WebSockets.
     """
     logger.info("Processing worker thread started.")
+    config = get_config()
+    batch_size = max(1, int(config.get("ml", "batch_size", 32) or 32))
+    rate_limiter = ConnectionRateLimiter(
+        maximum=int(config.get("ips", "rate_limit_connections", 100) or 100),
+        window_seconds=int(
+            config.get("ips", "rate_limit_window_seconds", 60) or 60
+        ),
+    )
+    rate_limit_enabled = bool(
+        config.get("ips", "rate_limit_enabled", False)
+    )
     last_cleanup = time.time()
     last_stats_collect = time.time()
     packet_counter = 0
@@ -168,15 +216,48 @@ def processing_worker(
 
         # 2. Process completed flows queue
         try:
-            flow_record = flow_queue.get_nowait()
-            feature_vector = flow_record.to_feature_vector()
+            first_flow = flow_queue.get_nowait()
+            flow_records = [first_flow]
+            while len(flow_records) < batch_size:
+                try:
+                    flow_records.append(flow_queue.get_nowait())
+                except queue.Empty:
+                    break
+            feature_vectors = []
+            for flow_record in flow_records:
+                vector = flow_record.to_feature_vector()
+                vector["src_ip"] = flow_record.src_ip
+                vector["dst_ip"] = flow_record.dst_ip
+                feature_vectors.append(vector)
+            ml_results = ml_engine.predict_batch(feature_vectors)
 
-            # Hybrid Detection
-            sig_result = signature_engine.evaluate(feature_vector)
-            ml_result = ml_engine.predict(feature_vector)
-            decision = decision_engine.decide(sig_result, ml_result, src_ip=flow_record.src_ip, now=current_time)
+            for flow_record, feature_vector, ml_result in zip(
+                flow_records, feature_vectors, ml_results
+            ):
+                sig_result = signature_engine.evaluate(feature_vector)
+                decision = decision_engine.decide(
+                    sig_result,
+                    ml_result,
+                    src_ip=flow_record.src_ip,
+                    now=current_time,
+                )
+                if rate_limit_enabled and rate_limiter.record(
+                    flow_record.src_ip, current_time
+                ):
+                    decision.is_threat = True
+                    decision.action = "BLOCK"
+                    decision.attack_type = "ConnectionRateLimit"
+                    decision.severity = "HIGH"
+                    decision.final_score = max(decision.final_score, 0.75)
 
-            if decision.is_threat or decision.action in ("BLOCK", "ALERT"):
+                metrics.inc("sagedral_flows_total")
+                if not (
+                    decision.is_threat or decision.action in ("BLOCK", "ALERT")
+                ):
+                    continue
+                country_name, country_code = geoip_resolver.country(
+                    flow_record.src_ip
+                )
                 alert_event = AlertEvent(
                     timestamp=current_time,
                     src_ip=flow_record.src_ip,
@@ -193,12 +274,20 @@ def processing_worker(
                     flow_duration=feature_vector["duration"],
                     total_bytes=flow_record.total_fwd_bytes + flow_record.total_bwd_bytes,
                 )
+                alert_data = alert_event.to_dict()
+                alert_data["feature_vector"] = {
+                    name: feature_vector.get(name, 0.0)
+                    for name in ml_engine.feature_names
+                }
+                alert_data["src_country"] = country_name
+                alert_data["src_country_code"] = country_code
 
                 # IPS Firewall Execution
                 if decision.action == "BLOCK":
                     ips_success = ips_module.block_ip(flow_record.src_ip)
                     if ips_success:
                         alert_event.action_taken = "BLOCKED"
+                        alert_data["action_taken"] = "BLOCKED"
                         # Update decision engine cache
                         decision_engine._blocked_ips_cache.add(flow_record.src_ip)
 
@@ -209,20 +298,53 @@ def processing_worker(
                     
                     async def save_and_notify():
                         async with _db_conn.AsyncSessionLocal() as db:
-                            await crud.create_alert(db, alert_event.to_dict())
+                            await crud.create_alert(db, alert_data)
                             if alert_event.action_taken == "BLOCKED":
+                                duration = (
+                                    int(
+                                        config.get(
+                                            "ips",
+                                            "rate_limit_block_seconds",
+                                            300,
+                                        )
+                                        or 300
+                                    )
+                                    if alert_event.attack_type
+                                    == "ConnectionRateLimit"
+                                    else ips_module.auto_unblock_after
+                                )
+                                if config.get(
+                                    "ips", "strike_escalation_enabled", True
+                                ):
+                                    offense = await crud.record_ip_offense(
+                                        db, alert_event.src_ip
+                                    )
+                                    duration = calculate_escalated_duration(
+                                        duration, offense.strike_count
+                                    )
                                 await crud.block_ip_db(
                                     db,
                                     ip=alert_event.src_ip,
                                     reason=f"Auto-blocked: {alert_event.attack_type}",
                                     alert_id=alert_event.alert_id,
-                                    duration_seconds=ips_module.auto_unblock_after,
+                                    duration_seconds=duration,
                                     blocked_by="system",
                                 )
-                        await ws_manager.broadcast("new_alert", alert_event.to_dict())
+                        await ws_manager.broadcast("new_alert", alert_data)
 
                     loop.run_until_complete(save_and_notify())
                     loop.close()
+                    metrics.inc(
+                        "sagedral_alerts_total",
+                        labels={
+                            "severity": alert_event.severity,
+                            "attack_type": alert_event.attack_type,
+                        },
+                    )
+                    if alert_event.action_taken == "BLOCKED":
+                        metrics.inc("sagedral_blocks_total")
+                    siem_exporter.send(alert_data)
+                    notification_manager.submit(alert_data)
                 except Exception as e:
                     logger.error(f"Error persisting alert event: {e}")
 
@@ -266,13 +388,16 @@ def capture_thread_worker(
     bpf_filter: str,
     promiscuous: bool,
     stop_event_ref: threading.Event,
+    backend: str = "scapy",
+    watchdog_idle_seconds: int = 30,
 ):
     """Capture thread with auto-recovery watchdog (IMP-CAP-02)."""
     restart_count = 0
     sniffer = None
 
     while not stop_event_ref.is_set():
-        sniffer = PacketCapture(
+        sniffer = create_packet_capture(
+            backend=backend,
             interface=interface,
             packet_queue=packet_queue,
             bpf_filter=bpf_filter,
@@ -291,10 +416,11 @@ def capture_thread_worker(
                 if (
                     received > 0
                     and last_seen is not None
-                    and last_seen > 30
+                    and last_seen > watchdog_idle_seconds
                 ):
                     logger.warning(
-                        "Capture watchdog: no packets for >30s on interface '%s', restarting capture",
+                        "Capture watchdog: no packets for >%ss on interface '%s', restarting capture",
+                        watchdog_idle_seconds,
                         interface,
                     )
                     sniffer.stop()
@@ -333,6 +459,7 @@ def run_app(enable_capture: bool = True):
     )
 
     logger.info("=== Starting SAGEDRAL-ML NIDPS System ===")
+    stop_event.clear()
 
     # Shared Queues
     packet_queue = queue.Queue(maxsize=config.get("capture", "queue_maxsize", 10000))
@@ -350,6 +477,31 @@ def run_app(enable_capture: bool = True):
         classifier_threshold=config.get("ml", "classifier_threshold", 0.6),
         enabled=config.get("ml", "enabled", True),
     )
+    ml_engine.configure_drift(
+        int(config.get("ml", "drift_window_size", 100) or 100)
+    )
+    ml_predictor = ml_engine
+    parallel_ml_engine = None
+    detection_workers = max(
+        1, int(config.get("performance", "detection_workers", 1) or 1)
+    )
+    if detection_workers > 1:
+        try:
+            from sagedral_ml.detection.parallel import MultiprocessMLEngine
+
+            parallel_ml_engine = MultiprocessMLEngine(
+                ml_engine, detection_workers
+            )
+            ml_predictor = parallel_ml_engine
+            logger.info(
+                "Multiprocess ML inference enabled with %d workers.",
+                detection_workers,
+            )
+        except Exception as exc:
+            logger.error(
+                "Could not start multiprocess ML inference; using local engine: %s",
+                exc,
+            )
     decision_engine = DecisionEngine(
         alert_threshold=config.get("decision", "alert_threshold", 0.5),
         block_threshold=config.get("decision", "block_threshold", 0.7),
@@ -386,7 +538,7 @@ def run_app(enable_capture: bool = True):
     # Worker Thread
     worker_thread = threading.Thread(
         target=processing_worker,
-        args=(packet_queue, flow_queue, flow_aggregator, signature_engine, ml_engine, decision_engine, ips_module),
+        args=(packet_queue, flow_queue, flow_aggregator, signature_engine, ml_predictor, decision_engine, ips_module),
         daemon=True,
     )
     worker_thread.start()
@@ -405,6 +557,10 @@ def run_app(enable_capture: bool = True):
                 config.get("capture", "bpf_filter", ""),
                 config.get("capture", "promiscuous", True),
                 stop_event,
+                config.get("capture", "backend", "scapy"),
+                int(
+                    config.get("capture", "watchdog_idle_seconds", 30) or 30
+                ),
             ),
             daemon=True,
             name="sagedral-capture",
@@ -427,7 +583,27 @@ def run_app(enable_capture: bool = True):
     api_host = config.get("api", "host", "0.0.0.0")
     api_port = config.get("api", "port", 8000)
     logger.info(f"Starting FastAPI Web Server & Dashboard at http://{api_host}:{api_port}")
-    uvicorn.run(app, host=api_host, port=api_port, log_level="warning")
+    watchdog_thread = threading.Thread(
+        target=_systemd_watchdog_worker,
+        args=(stop_event,),
+        daemon=True,
+        name="sagedral-systemd-watchdog",
+    )
+    watchdog_thread.start()
+    _systemd_notify("READY=1\nSTATUS=SAGEDRAL-ML API and detection pipeline active")
+    try:
+        uvicorn.run(app, host=api_host, port=api_port, log_level="warning")
+    finally:
+        stop_event.set()
+        _systemd_notify("STOPPING=1")
+        worker_thread.join(timeout=10)
+        if capture_thread is not None:
+            capture_thread.join(timeout=10)
+        if parallel_ml_engine is not None:
+            parallel_ml_engine.close()
+        notification_manager.close()
+        siem_exporter.close()
+        geoip_resolver.close()
 
 
 if __name__ == "__main__":

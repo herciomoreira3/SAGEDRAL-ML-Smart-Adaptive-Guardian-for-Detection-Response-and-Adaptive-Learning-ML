@@ -36,6 +36,9 @@ class AlertModel(Base):
     ml_anomaly_score = Column(Float, nullable=True)
     flow_duration = Column(Float, nullable=True)
     total_bytes = Column(Integer, nullable=True)
+    src_country = Column(String(100), nullable=True, index=True)
+    src_country_code = Column(String(8), nullable=True)
+    feature_vector_json = Column(Text, nullable=True)
     status = Column(String(20), default="open", index=True)  # open, closed, investigated
     feedback_label = Column(String(30), nullable=True, index=True)
     feedback_notes = Column(Text, nullable=True)
@@ -72,6 +75,8 @@ class AlertModel(Base):
             "ml_anomaly_score": self.ml_anomaly_score,
             "flow_duration": self.flow_duration,
             "total_bytes": self.total_bytes,
+            "src_country": self.src_country,
+            "src_country_code": self.src_country_code,
             "status": self.status or "open",
             "feedback_label": self.feedback_label,
             "feedback_notes": self.feedback_notes,
@@ -247,12 +252,21 @@ class AlertFeedbackModel(Base):
     notes = Column(Text, nullable=True)
     created_at = Column(Float, nullable=False, default=time.time, index=True)
     created_by = Column(String(50), nullable=True, index=True)
+    training_vector_json = Column(Text, nullable=True)
+    processed_at = Column(Float, nullable=True, index=True)
+    model_version = Column(String(64), nullable=True)
 
     __table_args__ = (
         Index("idx_feedback_alert_created", "alert_id", "created_at"),
     )
 
     def to_dict(self):
+        training_vector = None
+        if self.training_vector_json:
+            try:
+                training_vector = json.loads(self.training_vector_json)
+            except Exception:
+                training_vector = None
         return {
             "id": self.id,
             "alert_id": self.alert_id,
@@ -260,6 +274,9 @@ class AlertFeedbackModel(Base):
             "notes": self.notes,
             "created_at": self.created_at,
             "created_by": self.created_by,
+            "training_vector": training_vector,
+            "processed_at": self.processed_at,
+            "model_version": self.model_version,
         }
 
 
@@ -288,4 +305,44 @@ class SignatureRuleModel(Base):
             "attack_type": self.attack_type,
             "is_enabled": bool(self.is_enabled),
             "created_at": self.created_at,
+        }
+
+
+class SystemEventModel(Base):
+    """Durable system health, drift, HA, backup, and retraining events."""
+
+    __tablename__ = "system_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(Float, nullable=False, default=time.time, index=True)
+    event_type = Column(String(50), nullable=False, index=True)
+    severity = Column(String(20), nullable=False, default="INFO", index=True)
+    source = Column(String(50), nullable=False, default="system", index=True)
+    message = Column(Text, nullable=False)
+    detail_json = Column(Text, nullable=True)
+    acknowledged_at = Column(Float, nullable=True)
+    acknowledged_by = Column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("idx_system_event_type_ts", "event_type", "timestamp"),
+        Index("idx_system_event_severity_ts", "severity", "timestamp"),
+    )
+
+    def to_dict(self):
+        detail = None
+        if self.detail_json:
+            try:
+                detail = json.loads(self.detail_json)
+            except Exception:
+                detail = self.detail_json
+        return {
+            "id": self.id,
+            "timestamp": self.timestamp,
+            "event_type": self.event_type,
+            "severity": self.severity,
+            "source": self.source,
+            "message": self.message,
+            "detail": detail,
+            "acknowledged_at": self.acknowledged_at,
+            "acknowledged_by": self.acknowledged_by,
         }

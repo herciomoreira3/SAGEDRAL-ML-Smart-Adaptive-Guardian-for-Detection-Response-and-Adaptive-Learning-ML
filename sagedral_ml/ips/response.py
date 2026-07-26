@@ -8,7 +8,10 @@ import logging
 import re
 import shutil
 import subprocess
-from typing import Dict, List, Optional, Set
+import threading
+import time
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional, Set
 
 logger = logging.getLogger("sagedral_ml.ips.response")
 
@@ -138,8 +141,10 @@ class IPSModule:
         if self.enabled and self.backend == "nftables":
             self.setup_nftables_table()
 
-    def _parse_whitelist_entries(self, entries: List[str]) -> None:
+    def _parse_whitelist_entries(self, entries: List[Any]) -> None:
         for entry in entries:
+            if isinstance(entry, dict):
+                entry = entry.get("ip", "")
             if not entry or not isinstance(entry, str):
                 continue
             cleaned = entry.strip()
@@ -256,11 +261,20 @@ class IPSModule:
             for entry in active_blocked:
                 try:
                     ip_str = entry.ip if hasattr(entry, "ip") else str(entry)
-                    if self.is_whitelisted(ip_str):
+                    if "/" in ip_str:
+                        if self.is_entry_whitelisted(ip_str):
+                            logger.warning(
+                                f"Reconcile skip: network {ip_str} overlaps whitelist"
+                            )
+                            skipped_whitelisted += 1
+                            continue
+                        result = self.block_network(ip_str)
+                    elif self.is_whitelisted(ip_str):
                         logger.warning(f"Reconcile skip: IP {ip_str} is whitelisted")
                         skipped_whitelisted += 1
                         continue
-                    result = self.block_ip(ip_str)
+                    else:
+                        result = self.block_ip(ip_str)
                     if result:
                         success += 1
                     else:
@@ -282,10 +296,17 @@ class IPSModule:
         cmds = [
             ["nft", "add", "table", "inet", "sagedral"],
             ["nft", "add", "set", "inet", "sagedral", "blocklist", "{ type ipv4_addr; }"],
+            ["nft", "add", "set", "inet", "sagedral", "blocklist6", "{ type ipv6_addr; }"],
+            ["nft", "add", "set", "inet", "sagedral", "blocknets", "{ type ipv4_addr; flags interval; }"],
+            ["nft", "add", "set", "inet", "sagedral", "blocknets6", "{ type ipv6_addr; flags interval; }"],
             ["nft", "add", "chain", "inet", "sagedral", "input", "{ type filter hook input priority 0; }"],
             ["nft", "add", "rule", "inet", "sagedral", "input", "ip", "saddr", "@blocklist", "drop"],
+            ["nft", "add", "rule", "inet", "sagedral", "input", "ip6", "saddr", "@blocklist6", "drop"],
+            ["nft", "add", "rule", "inet", "sagedral", "input", "ip", "saddr", "@blocknets", "drop"],
+            ["nft", "add", "rule", "inet", "sagedral", "input", "ip6", "saddr", "@blocknets6", "drop"],
             ["nft", "add", "chain", "inet", "sagedral", "output", "{ type filter hook output priority 0; }"],
             ["nft", "add", "rule", "inet", "sagedral", "output", "ip", "daddr", "@blocklist", "drop"],
+            ["nft", "add", "rule", "inet", "sagedral", "output", "ip6", "daddr", "@blocklist6", "drop"],
         ]
 
         for cmd in cmds:
@@ -313,7 +334,9 @@ class IPSModule:
             return False
 
         if self.backend == "nftables":
-            cmd = ["nft", "add", "element", "inet", "sagedral", "blocklist", f"{{ {clean_ip} }}"]
+            parsed = ipaddress.ip_address(clean_ip)
+            set_name = "blocklist6" if parsed.version == 6 else "blocklist"
+            cmd = ["nft", "add", "element", "inet", "sagedral", set_name, f"{{ {clean_ip} }}"]
             try:
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
                 if res.returncode == 0:
@@ -350,7 +373,9 @@ class IPSModule:
             return False
 
         if self.backend == "nftables":
-            cmd = ["nft", "delete", "element", "inet", "sagedral", "blocklist", f"{{ {clean_ip} }}"]
+            parsed = ipaddress.ip_address(clean_ip)
+            set_name = "blocklist6" if parsed.version == 6 else "blocklist"
+            cmd = ["nft", "delete", "element", "inet", "sagedral", set_name, f"{{ {clean_ip} }}"]
             try:
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
                 if res.returncode == 0:
@@ -375,3 +400,110 @@ class IPSModule:
         else:
             logger.info(f"[MOCK IPS] Unblocked IP {clean_ip}")
             return True
+
+    def block_network(self, network: str) -> bool:
+        """Block an IPv4/IPv6 CIDR after overlap checks against whitelist."""
+        try:
+            clean_network = validate_ip_or_network(network)
+            parsed = ipaddress.ip_network(clean_network, strict=False)
+        except ValueError as exc:
+            logger.error("Cannot block invalid network: %s", exc)
+            return False
+        if parsed.prefixlen == parsed.max_prefixlen:
+            return self.block_ip(str(parsed.network_address))
+        if self.is_entry_whitelisted(clean_network):
+            logger.warning("Network %s overlaps whitelist; block aborted.", clean_network)
+            return False
+        if not self.enabled:
+            return False
+        if self.backend == "nftables":
+            set_name = "blocknets6" if parsed.version == 6 else "blocknets"
+            command = [
+                "nft",
+                "add",
+                "element",
+                "inet",
+                "sagedral",
+                set_name,
+                "{ %s }" % clean_network,
+            ]
+        elif self.backend == "iptables":
+            binary = "ip6tables" if parsed.version == 6 else "iptables"
+            command = [binary, "-I", "INPUT", "-s", clean_network, "-j", "DROP"]
+        else:
+            logger.info("[MOCK IPS] Blocked network %s", clean_network)
+            return True
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True, timeout=5
+            )
+            return result.returncode == 0
+        except Exception as exc:
+            logger.error("Network block failed: %s", exc)
+            return False
+
+    def unblock_network(self, network: str) -> bool:
+        try:
+            clean_network = validate_ip_or_network(network)
+            parsed = ipaddress.ip_network(clean_network, strict=False)
+        except ValueError:
+            return False
+        if parsed.prefixlen == parsed.max_prefixlen:
+            return self.unblock_ip(str(parsed.network_address))
+        if self.backend == "nftables":
+            set_name = "blocknets6" if parsed.version == 6 else "blocknets"
+            command = [
+                "nft",
+                "delete",
+                "element",
+                "inet",
+                "sagedral",
+                set_name,
+                "{ %s }" % clean_network,
+            ]
+        elif self.backend == "iptables":
+            binary = "ip6tables" if parsed.version == 6 else "iptables"
+            command = [binary, "-D", "INPUT", "-s", clean_network, "-j", "DROP"]
+        else:
+            return True
+        try:
+            return (
+                subprocess.run(
+                    command, capture_output=True, text=True, timeout=5
+                ).returncode
+                == 0
+            )
+        except Exception:
+            return False
+
+
+class ConnectionRateLimiter:
+    """Sliding-window flow limiter keyed by source IP."""
+
+    def __init__(
+        self,
+        maximum: int = 100,
+        window_seconds: int = 60,
+    ) -> None:
+        self.maximum = max(1, int(maximum))
+        self.window_seconds = max(1, int(window_seconds))
+        self._events: Dict[str, Deque[float]] = {}
+        self._lock = threading.Lock()
+
+    def record(self, ip: str, now: Optional[float] = None) -> bool:
+        """Record one flow and return True when the rate is exceeded."""
+        timestamp = time.time() if now is None else float(now)
+        cutoff = timestamp - self.window_seconds
+        with self._lock:
+            events = self._events.setdefault(ip, deque())
+            while events and events[0] < cutoff:
+                events.popleft()
+            events.append(timestamp)
+            exceeded = len(events) > self.maximum
+            if not events:
+                self._events.pop(ip, None)
+            return exceeded
+
+    def count(self, ip: str) -> int:
+        with self._lock:
+            return len(self._events.get(ip, ()))

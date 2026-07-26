@@ -8,27 +8,48 @@ import {
   Activity, 
   Settings, 
   BrainCircuit,
-  LogOut
+  LogOut,
+  ScrollText,
+  Users as UsersIcon
 } from 'lucide-react';
 import { useTranslation } from '../i18n/hook';
 import toast from 'react-hot-toast';
+import { logout as logoutSession } from '../api/client';
 
 export function Sidebar() {
   const { T } = useTranslation();
   const navigate = useNavigate();
+  let currentUser = {};
+  try {
+    currentUser = JSON.parse(localStorage.getItem('sagedral_user') || '{}');
+  } catch {
+    currentUser = {};
+  }
 
   const navItems = [
     { to: '/', label: T.menu_overview, icon: LayoutDashboard },
     { to: '/alerts', label: T.menu_alerts, icon: AlertTriangle },
     { to: '/blocked-ips', label: T.menu_blocked_ips, icon: Ban },
     { to: '/traffic', label: T.menu_traffic, icon: Activity },
-    { to: '/settings', label: T.menu_settings, icon: Settings },
     { to: '/model', label: T.menu_model_info, icon: BrainCircuit },
+    ...(currentUser.role === 'admin'
+      ? [
+          { to: '/settings', label: T.menu_settings, icon: Settings },
+          { to: '/audit', label: T.menu_audit, icon: ScrollText },
+          { to: '/users', label: T.menu_users, icon: UsersIcon },
+        ]
+      : []),
   ];
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await logoutSession();
+    } catch {
+      // Local token removal must still work if the API is temporarily down.
+    }
     localStorage.removeItem('sagedral_token');
-    toast.success('Sessão terminada');
+    localStorage.removeItem('sagedral_user');
+    toast.success(T.menu_logout);
     navigate('/login', { replace: true });
   };
 

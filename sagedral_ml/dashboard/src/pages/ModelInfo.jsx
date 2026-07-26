@@ -1,14 +1,16 @@
 import React, { useEffect, useState } from 'react';
-import { getModelInfo } from '../api/client';
+import { getModelInfo, getModelDrift } from '../api/client';
 import { useTranslation } from '../i18n/hook';
 import { BrainCircuit, CheckCircle2, Cpu } from 'lucide-react';
 
 export function ModelInfo() {
   const { T } = useTranslation();
   const [modelInfo, setModelInfo] = useState(null);
+  const [drift, setDrift] = useState(null);
 
   useEffect(() => {
     getModelInfo().then(setModelInfo).catch(console.error);
+    getModelDrift().then(setDrift).catch(() => setDrift(null));
   }, []);
 
   if (!modelInfo) {
@@ -21,6 +23,12 @@ export function ModelInfo() {
         <h1 className="text-2xl font-bold text-slate-100">{T.model_title}</h1>
         <p className="text-xs text-slate-400 mt-1">{T.model_subtitle}</p>
       </div>
+
+      {drift?.detected && (
+        <div className="p-4 rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-300 text-sm">
+          {T.model_drift_warning.replace('{psi}', Number(drift.psi || 0).toFixed(3))}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="glass-card p-5 space-y-4">

@@ -36,6 +36,8 @@ DEFAULT_CONFIG_DICT: Dict[str, Any] = {
         "bpf_filter": "",
         "promiscuous": True,
         "queue_maxsize": 10000,
+        "backend": "scapy",
+        "watchdog_idle_seconds": 30,
     },
     "feature_extraction": {
         "flow_timeout": 60,
@@ -47,6 +49,8 @@ DEFAULT_CONFIG_DICT: Dict[str, Any] = {
         "custom_rules_file": "",
         "custom_rules_dir": "/var/lib/sagedral-ml/custom-rules",
         "disabled_rules": [],
+        "params": {},
+        "whitelist_overrides": {},
     },
     "ml": {
         "enabled": True,
@@ -54,6 +58,17 @@ DEFAULT_CONFIG_DICT: Dict[str, Any] = {
         "classifier_threshold": 0.6,
         "model_dir": "/var/lib/sagedral-ml/models",
         "retrain_on_startup": False,
+        "batch_size": 32,
+        "batch_timeout_ms": 50,
+        "drift_enabled": True,
+        "drift_window_size": 100,
+        "drift_psi_threshold": 0.25,
+        "feedback_retrain_minimum": 20,
+        "feedback_retrain_interval_hours": 24,
+        "adaptive_learning_enabled": True,
+        "adaptive_min_accuracy": 0.70,
+        "adaptive_min_f1": 0.65,
+        "adaptive_min_classifier_accuracy": 0.65,
     },
     "decision": {
         "alert_threshold": 0.5,
@@ -67,19 +82,32 @@ DEFAULT_CONFIG_DICT: Dict[str, Any] = {
         "preferred_backend": "nftables",
         "auto_unblock_after": 3600,
         "whitelist": ["127.0.0.1", "::1"],
+        "whitelist_notes": {},
+        "strike_escalation_enabled": True,
+        "rate_limit_enabled": False,
+        "rate_limit_connections": 100,
+        "rate_limit_window_seconds": 60,
+        "rate_limit_block_seconds": 300,
     },
     "api": {
         "host": "0.0.0.0",
         "port": 8000,
         "cors_origins": ["http://localhost:5173", "http://localhost:3000"],
+        "trusted_proxies": ["127.0.0.1", "::1"],
+        "csp_enabled": True,
+        "metrics_enabled": True,
+        "global_rate_limit_per_minute": 600,
     },
     "database": {
+        "backend": "sqlite",
+        "connection_string": "",
         "path": "/var/lib/sagedral-ml/sagedral.db",
         "retention_days_alerts": 30,
         "retention_days_traffic": 7,
         "backup_dir": "/var/lib/sagedral-ml/backups",
         "backup_interval_hours": 24,
         "backup_retention_days": 30,
+        "run_migrations": True,
     },
     "auth": {
         "secret_key": "",
@@ -89,6 +117,44 @@ DEFAULT_CONFIG_DICT: Dict[str, Any] = {
         "default_admin_password": "",
         "default_admin_email": "admin@sagedral.local",
         "admin_secret_file": "/var/lib/sagedral-ml/.sagedral-admin-secret",
+        "jwt_secret_file": "/var/lib/sagedral-ml/.sagedral-jwt-secret",
+    },
+    "geolocation": {
+        "enabled": False,
+        "db_path": "/usr/share/GeoIP/GeoLite2-Country.mmdb",
+    },
+    "siem": {
+        "enabled": False,
+        "minimum_severity": "MEDIUM",
+        "syslog_host": "",
+        "syslog_port": 514,
+        "syslog_protocol": "udp",
+        "webhook_urls": [],
+        "webhook_timeout_seconds": 5,
+    },
+    "notifications": {
+        "enabled": False,
+        "minimum_severity": "HIGH",
+        "telegram_bot_token": "",
+        "telegram_chat_id": "",
+        "smtp_host": "",
+        "smtp_port": 587,
+        "smtp_starttls": True,
+        "smtp_username": "",
+        "smtp_password": "",
+        "email_sender": "",
+        "email_recipients": [],
+    },
+    "ha": {
+        "enabled": False,
+        "node_id": "",
+        "peer_urls": [],
+        "shared_secret": "",
+        "sync_interval_seconds": 30,
+    },
+    "performance": {
+        "detection_workers": 1,
+        "profile_enabled": False,
     },
 }
 
@@ -117,6 +183,8 @@ interface = ""                          # "" = auto-detect interface (RECOMMENDE
 bpf_filter = ""                         # BPF filter string (e.g., "tcp port 80 or udp")
 promiscuous = true
 queue_maxsize = 10000
+backend = "scapy"                       # scapy | libpcap | af_packet
+watchdog_idle_seconds = 30
 
 [feature_extraction]
 flow_timeout = 60                       # Seconds before flow is considered completed
@@ -128,6 +196,8 @@ enabled = true
 custom_rules_file = ""                  # Optional path to custom Python rules file
 custom_rules_dir = "/var/lib/sagedral-ml/custom-rules"  # Whitelisted directory for custom rule files
 disabled_rules = []                     # List of rule IDs to disable (e.g. ["SIG-002"])
+params = {}                              # Per-rule overrides, e.g. [signature.params.SIG-001]
+whitelist_overrides = {}                # CIDR/IP -> rule IDs ignored for that source
 
 [ml]
 enabled = true
@@ -135,6 +205,17 @@ anomaly_threshold = 0.7                 # Score >= threshold indicates anomaly (
 classifier_threshold = 0.6             # Minimum confidence for multiclass classifier
 model_dir = "/var/lib/sagedral-ml/models"
 retrain_on_startup = false
+batch_size = 32
+batch_timeout_ms = 50
+drift_enabled = true
+drift_window_size = 100
+drift_psi_threshold = 0.25
+feedback_retrain_minimum = 20
+feedback_retrain_interval_hours = 24
+adaptive_learning_enabled = true
+adaptive_min_accuracy = 0.70
+adaptive_min_f1 = 0.65
+adaptive_min_classifier_accuracy = 0.65
 
 [decision]
 alert_threshold = 0.5                   # Score >= threshold generates alert
@@ -151,19 +232,32 @@ whitelist = [
     "127.0.0.1",
     "::1",
 ]
+whitelist_notes = {}
+strike_escalation_enabled = true
+rate_limit_enabled = false
+rate_limit_connections = 100
+rate_limit_window_seconds = 60
+rate_limit_block_seconds = 300
 
 [api]
 host = "0.0.0.0"
 port = 8000
 cors_origins = ["http://localhost:5173", "http://localhost:3000"]
+trusted_proxies = ["127.0.0.1", "::1"]
+csp_enabled = true
+metrics_enabled = true
+global_rate_limit_per_minute = 600
 
 [database]
+backend = "sqlite"
+connection_string = ""                # PostgreSQL example: postgresql+asyncpg://user:pass@host/db
 path = "/var/lib/sagedral-ml/sagedral.db"
 retention_days_alerts = 30
 retention_days_traffic = 7
 backup_dir = "/var/lib/sagedral-ml/backups"
 backup_interval_hours = 24
 backup_retention_days = 30
+run_migrations = true
 
 [auth]
 secret_key = ""                       # "" = auto-generate random on first startup (set persistent secret for production).
@@ -173,17 +267,67 @@ default_admin_username = "admin"
 default_admin_password = ""           # "" = generate random first-admin password and write admin_secret_file.
 default_admin_email = "admin@sagedral.local"
 admin_secret_file = "/var/lib/sagedral-ml/.sagedral-admin-secret"
+jwt_secret_file = "/var/lib/sagedral-ml/.sagedral-jwt-secret"
+
+[geolocation]
+enabled = false
+db_path = "/usr/share/GeoIP/GeoLite2-Country.mmdb"
+
+[siem]
+enabled = false
+minimum_severity = "MEDIUM"
+syslog_host = ""
+syslog_port = 514
+syslog_protocol = "udp"
+webhook_urls = []
+webhook_timeout_seconds = 5
+
+[notifications]
+enabled = false
+minimum_severity = "HIGH"
+telegram_bot_token = ""
+telegram_chat_id = ""
+smtp_host = ""
+smtp_port = 587
+smtp_starttls = true
+smtp_username = ""
+smtp_password = ""
+email_sender = ""
+email_recipients = []
+
+[ha]
+enabled = false
+node_id = ""
+peer_urls = []
+shared_secret = ""
+sync_interval_seconds = 30
+
+[performance]
+detection_workers = 1
+profile_enabled = false
 """
 
 
 class Config:
     """System configuration container."""
 
+    sensitive_keys: List[str] = [
+        "auth.secret_key",
+        "auth.default_admin_password",
+        "database.connection_string",
+        "siem.webhook_urls",
+        "notifications.telegram_bot_token",
+        "notifications.smtp_password",
+        "ha.shared_secret",
+    ]
+
     requires_restart_keys: List[str] = [
         "capture.interface",
         "capture.bpf_filter",
         "capture.promiscuous",
         "capture.queue_maxsize",
+        "capture.backend",
+        "capture.watchdog_idle_seconds",
         "feature_extraction.flow_timeout",
         "feature_extraction.max_packets_per_flow",
         "feature_extraction.max_active_flows",
@@ -191,29 +335,75 @@ class Config:
         "signature.custom_rules_file",
         "signature.custom_rules_dir",
         "signature.disabled_rules",
+        "signature.params",
+        "signature.whitelist_overrides",
         "ml.enabled",
         "ml.anomaly_threshold",
         "ml.classifier_threshold",
         "ml.model_dir",
         "ml.retrain_on_startup",
+        "ml.batch_size",
+        "ml.batch_timeout_ms",
+        "ml.drift_enabled",
+        "ml.drift_window_size",
+        "ml.drift_psi_threshold",
+        "ml.feedback_retrain_minimum",
+        "ml.feedback_retrain_interval_hours",
+        "ml.adaptive_learning_enabled",
+        "ml.adaptive_min_accuracy",
+        "ml.adaptive_min_f1",
+        "ml.adaptive_min_classifier_accuracy",
         "decision.weight_signature",
         "decision.weight_ml",
         "ips.enabled",
         "ips.preferred_backend",
         "ips.auto_unblock_after",
         "ips.whitelist",
+        "ips.whitelist_notes",
+        "ips.strike_escalation_enabled",
+        "ips.rate_limit_enabled",
+        "ips.rate_limit_connections",
+        "ips.rate_limit_window_seconds",
+        "ips.rate_limit_block_seconds",
         "api.host",
         "api.port",
         "api.cors_origins",
+        "api.trusted_proxies",
+        "api.csp_enabled",
+        "api.metrics_enabled",
+        "api.global_rate_limit_per_minute",
+        "database.backend",
+        "database.connection_string",
         "database.path",
         "database.retention_days_alerts",
         "database.retention_days_traffic",
         "database.backup_dir",
         "database.backup_interval_hours",
         "database.backup_retention_days",
+        "database.run_migrations",
         "general.log_level",
         "general.log_file",
         "general.data_dir",
+        "geolocation.enabled",
+        "geolocation.db_path",
+        "siem.enabled",
+        "siem.minimum_severity",
+        "siem.syslog_host",
+        "siem.syslog_port",
+        "siem.syslog_protocol",
+        "siem.webhook_urls",
+        "notifications.enabled",
+        "notifications.minimum_severity",
+        "notifications.telegram_bot_token",
+        "notifications.telegram_chat_id",
+        "notifications.smtp_host",
+        "notifications.smtp_port",
+        "notifications.email_recipients",
+        "ha.enabled",
+        "ha.node_id",
+        "ha.peer_urls",
+        "ha.shared_secret",
+        "performance.detection_workers",
     ]
 
     def __init__(self, data: Dict[str, Any]):
@@ -245,6 +435,16 @@ class Config:
     def to_dict(self) -> Dict[str, Any]:
         return self._data
 
+    def to_safe_dict(self, mask: str = "********") -> Dict[str, Any]:
+        """Return a copy safe to expose through the API or CLI."""
+        result = copy.deepcopy(self._data)
+        for dotted_key in self.sensitive_keys:
+            section, key = dotted_key.split(".", 1)
+            section_data = result.get(section)
+            if isinstance(section_data, dict) and section_data.get(key):
+                section_data[key] = mask
+        return result
+
     def validate(self) -> List[str]:
         """Validate configuration values and return list of validation error messages."""
         errors = []
@@ -259,6 +459,22 @@ class Config:
             anomaly_th_float = -1.0
         if not (0.0 <= anomaly_th_float <= 1.0):
             errors.append("ml.anomaly_threshold must be between 0.0 and 1.0")
+
+        for threshold_key in (
+            "classifier_threshold",
+            "drift_psi_threshold",
+            "adaptive_min_accuracy",
+            "adaptive_min_f1",
+            "adaptive_min_classifier_accuracy",
+        ):
+            try:
+                threshold_value = float(self.get("ml", threshold_key, 0.0))
+            except (TypeError, ValueError):
+                threshold_value = -1.0
+            if not 0.0 <= threshold_value <= 1.0:
+                errors.append(
+                    "ml.%s must be between 0.0 and 1.0" % threshold_key
+                )
 
         block_th = self.get("decision", "block_threshold", 0.7)
         try:
@@ -282,6 +498,68 @@ class Config:
         backend = self.get("ips", "preferred_backend", "nftables")
         if backend not in ("nftables", "iptables"):
             errors.append("ips.preferred_backend must be 'nftables' or 'iptables'")
+
+        capture_backend = self.get("capture", "backend", "scapy")
+        if capture_backend not in ("scapy", "libpcap", "af_packet"):
+            errors.append("capture.backend must be 'scapy', 'libpcap', or 'af_packet'")
+
+        database_backend = self.get("database", "backend", "sqlite")
+        if database_backend not in ("sqlite", "postgresql"):
+            errors.append("database.backend must be 'sqlite' or 'postgresql'")
+        if database_backend == "postgresql" and not self.get(
+            "database", "connection_string", ""
+        ):
+            errors.append(
+                "database.connection_string is required when database.backend='postgresql'"
+            )
+
+        configured_secret = self.get("auth", "secret_key", "")
+        if configured_secret and len(str(configured_secret).strip()) < 32:
+            errors.append(
+                "auth.secret_key must contain at least 32 characters or be empty"
+            )
+        if self.get("auth", "algorithm", "HS256") not in (
+            "HS256",
+            "HS384",
+            "HS512",
+        ):
+            errors.append("auth.algorithm must be HS256, HS384, or HS512")
+        if self.get("siem", "syslog_protocol", "udp") not in ("udp", "tcp"):
+            errors.append("siem.syslog_protocol must be 'udp' or 'tcp'")
+        if self.get("ha", "enabled", False) and len(
+            str(self.get("ha", "shared_secret", "") or "")
+        ) < 24:
+            errors.append(
+                "ha.shared_secret must contain at least 24 characters when HA is enabled"
+            )
+        for section, key in (
+            ("siem", "webhook_urls"),
+            ("ha", "peer_urls"),
+        ):
+            values = self.get(section, key, []) or []
+            if not isinstance(values, list):
+                errors.append("%s.%s must be a list" % (section, key))
+                continue
+            for value in values:
+                if not str(value).startswith(("http://", "https://")):
+                    errors.append(
+                        "%s.%s entries must use http:// or https://"
+                        % (section, key)
+                    )
+
+        for section, key in (
+            ("capture", "queue_maxsize"),
+            ("feature_extraction", "max_active_flows"),
+            ("ml", "batch_size"),
+            ("ml", "drift_window_size"),
+            ("ips", "rate_limit_connections"),
+            ("api", "global_rate_limit_per_minute"),
+        ):
+            try:
+                if int(self.get(section, key, 1)) <= 0:
+                    errors.append(f"{section}.{key} must be greater than zero")
+            except (TypeError, ValueError):
+                errors.append(f"{section}.{key} must be an integer")
 
         return errors
 
@@ -374,10 +652,10 @@ def load_config(custom_path: Optional[str] = None) -> Config:
     """
     global _config_instance
 
-    config_dict = getattr(sys, "_sagedral_base_config", None)
-    if config_dict is None:
-        import copy
-        config_dict = copy.deepcopy(DEFAULT_CONFIG_DICT)
+    base_config = getattr(sys, "_sagedral_base_config", None)
+    config_dict = copy.deepcopy(
+        base_config if base_config is not None else DEFAULT_CONFIG_DICT
+    )
 
     config_file_path: Optional[Path] = None
 

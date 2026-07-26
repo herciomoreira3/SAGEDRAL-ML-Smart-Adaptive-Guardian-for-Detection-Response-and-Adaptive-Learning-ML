@@ -7,6 +7,8 @@ import ast
 import json
 import os
 import stat
+import ipaddress
+import copy
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional
 
@@ -54,7 +56,16 @@ class SignatureEngine:
         custom_rules_file: Optional[str] = None,
     ):
         self.disabled_rules = set(disabled_rules or [])
-        self.rules: List[Dict[str, Any]] = list(SIGNATURE_RULES)
+        self.rules: List[Dict[str, Any]] = copy.deepcopy(SIGNATURE_RULES)
+        cfg = get_config()
+        configured_params = cfg.get("signature", "params", {})
+        self.rule_param_overrides = (
+            configured_params if isinstance(configured_params, dict) else {}
+        )
+        configured_whitelist = cfg.get("signature", "whitelist_overrides", {})
+        self.whitelist_overrides = (
+            configured_whitelist if isinstance(configured_whitelist, dict) else {}
+        )
 
         if custom_rules_file:
             self._load_custom_rules(custom_rules_file)
@@ -227,6 +238,38 @@ class SignatureEngine:
         logger.info(f"Loaded {added} custom signature rules from database.")
         return added
 
+    async def hot_reload_rules(self, db_session) -> int:
+        """Replace DB-origin rules atomically while retaining defaults/files."""
+        self.rules = [rule for rule in self.rules if not rule.get("from_db")]
+        return await self.load_rules_from_db(db_session)
+
+    def _is_rule_whitelisted(self, rule_id: str, src_ip: Optional[str]) -> bool:
+        if not src_ip:
+            return False
+        try:
+            address = ipaddress.ip_address(src_ip)
+        except ValueError:
+            return False
+        for key, value in self.whitelist_overrides.items():
+            networks = []
+            rule_ids = []
+            if str(key).startswith("SIG-"):
+                rule_ids = [str(key)]
+                networks = value if isinstance(value, list) else [value]
+            else:
+                networks = [key]
+                rule_ids = value if isinstance(value, list) else [value]
+            if rule_id not in [str(item) for item in rule_ids]:
+                continue
+            for network_value in networks:
+                try:
+                    network = ipaddress.ip_network(str(network_value), strict=False)
+                    if address in network:
+                        return True
+                except ValueError:
+                    continue
+        return False
+
     def evaluate(self, feature_vector: Dict[str, Any]) -> SignatureResult:
         matched_rules = []
         attack_types = []
@@ -236,13 +279,20 @@ class SignatureEngine:
             rule_id = rule.get("rule_id", "")
             if rule_id in self.disabled_rules:
                 continue
+            if self._is_rule_whitelisted(
+                rule_id, str(feature_vector.get("src_ip", "") or "")
+            ):
+                continue
 
             condition = rule.get("condition")
             if not callable(condition):
                 continue
 
             try:
-                params = rule.get("params", {})
+                params = dict(rule.get("params", {}))
+                override = self.rule_param_overrides.get(rule_id, {})
+                if isinstance(override, dict):
+                    params.update(override)
                 try:
                     matched = condition(feature_vector, params)
                 except TypeError:

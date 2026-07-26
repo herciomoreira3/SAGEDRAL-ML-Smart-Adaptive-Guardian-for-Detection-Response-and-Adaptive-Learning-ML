@@ -22,6 +22,7 @@ from sagedral_ml.auth.security import (
     UserProfile as _SecurityUserProfile,
 )
 from sagedral_ml.api.schemas.auth import LoginResponse, UserProfile
+from sagedral_ml.api.rate_limit import limiter
 
 logger = logging.getLogger("sagedral_ml.api.routers.auth")
 
@@ -87,6 +88,7 @@ async def _write_audit_log(
 
 
 @router.post("/login", response_model=LoginResponse)
+@limiter.limit("10/minute")
 async def login(
     request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
@@ -186,3 +188,22 @@ async def get_me(
     current_user: UserModel = Depends(get_current_user),
 ):
     return _user_to_profile(current_user)
+
+
+@router.post("/logout")
+async def logout(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
+):
+    await _write_audit_log(
+        db,
+        current_user,
+        "logout",
+        request,
+        target_entity="user",
+        target_id=current_user.username,
+    )
+    # Access tokens are short-lived and stateless. The client deletes its
+    # token; a future refresh-token implementation can revoke the token family.
+    return {"success": True}

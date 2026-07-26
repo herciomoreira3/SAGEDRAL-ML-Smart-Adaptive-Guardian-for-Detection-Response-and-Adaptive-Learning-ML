@@ -1,9 +1,9 @@
 import React from 'react';
-import { X, Ban, ShieldCheck } from 'lucide-react';
+import { X, Ban, ThumbsUp, ThumbsDown } from 'lucide-react';
 import { SeverityBadge } from './SeverityBadge';
 import { useTranslation } from '../i18n/hook';
 
-export function AlertDetailModal({ alert, onClose, onBlock }) {
+export function AlertDetailModal({ alert, onClose, onBlock, onFeedback }) {
   const { T } = useTranslation();
   if (!alert) return null;
 
@@ -96,7 +96,21 @@ export function AlertDetailModal({ alert, onClose, onBlock }) {
           )}
         </div>
 
-        <div className="p-4 border-t border-slate-800 bg-slate-950/40 flex justify-end gap-3">
+        <div className="p-4 border-t border-slate-800 bg-slate-950/40 flex flex-wrap justify-end gap-3">
+          <button
+            onClick={() => onFeedback?.(alert.alert_id, 'TRUE_POSITIVE')}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600/20 text-emerald-400 text-xs"
+          >
+            <ThumbsUp className="w-3.5 h-3.5" />
+            {T.modal_true_positive}
+          </button>
+          <button
+            onClick={() => onFeedback?.(alert.alert_id, 'FALSE_POSITIVE')}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-600/20 text-amber-400 text-xs"
+          >
+            <ThumbsDown className="w-3.5 h-3.5" />
+            {T.modal_false_positive}
+          </button>
           <button
             onClick={onClose}
             className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors"

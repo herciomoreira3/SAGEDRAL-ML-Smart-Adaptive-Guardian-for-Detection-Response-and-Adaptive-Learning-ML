@@ -7,6 +7,7 @@ import os
 import json
 import argparse
 import logging
+import time
 import numpy as np
 import pandas as pd
 import joblib
@@ -20,7 +21,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("sagedral_ml.scripts.train")
 
 
-def train_models(dataset_path: str, output_dir: str):
+def train_models(
+    dataset_path: str,
+    output_dir: str,
+    validation_split: float = 0.2,
+):
+    if not 0.05 <= float(validation_split) <= 0.5:
+        raise ValueError("validation_split must be between 0.05 and 0.5")
     os.makedirs(output_dir, exist_ok=True)
     logger.info(f"Loading dataset from {dataset_path}...")
 
@@ -51,7 +58,12 @@ def train_models(dataset_path: str, output_dir: str):
 
     # Split dataset
     X_train, X_val, y_bin_train, y_bin_val, y_raw_train, y_raw_val = train_test_split(
-        X, y_binary, y_raw, test_size=0.2, random_state=42, stratify=y_binary
+        X,
+        y_binary,
+        y_raw,
+        test_size=float(validation_split),
+        random_state=42,
+        stratify=y_binary,
     )
 
     # ================= Stage 1: Binary Anomaly Detector =================
@@ -89,22 +101,64 @@ def train_models(dataset_path: str, output_dir: str):
     anomaly_path = os.path.join(output_dir, "anomaly_detector.pkl")
     classifier_path = os.path.join(output_dir, "attack_classifier.pkl")
     feature_path = os.path.join(output_dir, "feature_names.json")
+    profile_path = os.path.join(output_dir, "model_profile.json")
+    metadata_path = os.path.join(output_dir, "model_metadata.json")
 
     joblib.dump(anomaly_model, anomaly_path)
     joblib.dump(classifier_model, classifier_path)
     with open(feature_path, "w") as f:
         json.dump(FEATURE_NAMES, f, indent=2)
+    normal_mask = ~y_binary
+    profile_source = X.loc[normal_mask] if bool(normal_mask.any()) else X
+    with open(profile_path, "w") as f:
+        json.dump(
+            {
+                "feature_mean": {
+                    name: float(profile_source[name].mean())
+                    for name in FEATURE_NAMES
+                },
+                "feature_std": {
+                    name: float(profile_source[name].std(ddof=0) or 0.0)
+                    for name in FEATURE_NAMES
+                },
+                "normal_sample_count": int(len(profile_source)),
+                "generated_at": time.time(),
+            },
+            f,
+            indent=2,
+        )
+    version = "1.0.%d" % int(time.time())
+    with open(metadata_path, "w") as f:
+        json.dump(
+            {
+                "version": version,
+                "trained_at": time.time(),
+                "dataset_rows": int(len(X)),
+                "anomaly_accuracy": float(acc),
+                "anomaly_f1": float(f1),
+                "classifier_accuracy": float(cls_acc),
+            },
+            f,
+            indent=2,
+        )
 
     logger.info(f"Models successfully saved to {output_dir}")
+    return {
+        "version": version,
+        "anomaly_accuracy": float(acc),
+        "anomaly_f1": float(f1),
+        "classifier_accuracy": float(cls_acc),
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train SAGEDRAL-ML LightGBM Models")
     parser.add_argument("--dataset", required=True, help="Path to input CSV dataset")
     parser.add_argument("--output-dir", default="/var/lib/sagedral-ml/models", help="Output directory")
+    parser.add_argument("--validation-split", type=float, default=0.2)
     args = parser.parse_args()
 
-    train_models(args.dataset, args.output_dir)
+    train_models(args.dataset, args.output_dir, args.validation_split)
 
 
 if __name__ == "__main__":

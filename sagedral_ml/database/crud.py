@@ -17,6 +17,9 @@ from sagedral_ml.database.models import (
     SignatureRuleModel,
     IPOffenseHistoryModel,
     AlertFeedbackModel,
+    AuditLogModel,
+    UserModel,
+    SystemEventModel,
 )
 
 logger = logging.getLogger("sagedral_ml.database.crud")
@@ -47,6 +50,13 @@ async def create_alert(db: AsyncSession, alert_data: Dict[str, Any]) -> AlertMod
         ml_anomaly_score=alert_data.get("ml_anomaly_score"),
         flow_duration=alert_data.get("flow_duration"),
         total_bytes=alert_data.get("total_bytes"),
+        src_country=alert_data.get("src_country"),
+        src_country_code=alert_data.get("src_country_code"),
+        feature_vector_json=json.dumps(
+            alert_data.get("feature_vector"), default=str
+        )
+        if alert_data.get("feature_vector") is not None
+        else None,
         status=alert_data.get("status", "open"),
     )
     db.add(alert)
@@ -151,6 +161,7 @@ async def create_alert_feedback(
         label=label,
         notes=notes,
         created_by=created_by,
+        training_vector_json=alert.feature_vector_json,
     )
     db.add(feedback)
     alert.feedback_label = label
@@ -227,6 +238,14 @@ async def record_ip_offense(db: AsyncSession, ip: str) -> IPOffenseHistoryModel:
     await db.commit()
     await db.refresh(offense)
     return offense
+
+
+async def get_ip_offense(
+    db: AsyncSession, ip: str
+) -> Optional[IPOffenseHistoryModel]:
+    stmt = select(IPOffenseHistoryModel).where(IPOffenseHistoryModel.ip == ip)
+    res = await db.execute(stmt)
+    return res.scalar_one_or_none()
 
 
 async def unblock_ip_db(db: AsyncSession, ip: str) -> bool:
@@ -319,6 +338,47 @@ async def get_custom_signature_rules(db: AsyncSession) -> List[SignatureRuleMode
     return list(res.scalars().all())
 
 
+async def get_all_signature_rules(db: AsyncSession) -> List[SignatureRuleModel]:
+    stmt = select(SignatureRuleModel).order_by(SignatureRuleModel.rule_id.asc())
+    res = await db.execute(stmt)
+    return list(res.scalars().all())
+
+
+async def update_signature_rule(
+    db: AsyncSession, rule_id: str, values: Dict[str, Any]
+) -> Optional[SignatureRuleModel]:
+    allowed = {
+        "name",
+        "description",
+        "severity",
+        "condition_expr",
+        "attack_type",
+        "is_enabled",
+    }
+    clean_values = {key: value for key, value in values.items() if key in allowed}
+    if "is_enabled" in clean_values:
+        clean_values["is_enabled"] = int(bool(clean_values["is_enabled"]))
+    if clean_values:
+        await db.execute(
+            update(SignatureRuleModel)
+            .where(SignatureRuleModel.rule_id == rule_id)
+            .values(**clean_values)
+        )
+        await db.commit()
+    result = await db.execute(
+        select(SignatureRuleModel).where(SignatureRuleModel.rule_id == rule_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def delete_signature_rule(db: AsyncSession, rule_id: str) -> bool:
+    result = await db.execute(
+        delete(SignatureRuleModel).where(SignatureRuleModel.rule_id == rule_id)
+    )
+    await db.commit()
+    return bool(result.rowcount)
+
+
 # ================= CONFIG HISTORY / AUDIT =================
 
 async def create_config_history_entries(
@@ -340,6 +400,181 @@ async def create_config_history_entries(
     if count:
         await db.commit()
     return count
+
+
+# ================= USERS / AUDIT / SYSTEM EVENTS =================
+
+async def create_audit_log(
+    db: AsyncSession,
+    action_type: str,
+    user: Optional[Any] = None,
+    target_entity: Optional[str] = None,
+    target_id: Optional[str] = None,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    detail: Optional[Dict[str, Any]] = None,
+) -> AuditLogModel:
+    entry = AuditLogModel(
+        timestamp=time.time(),
+        user_id=getattr(user, "id", None),
+        username=getattr(user, "username", None),
+        action_type=action_type[:50],
+        target_entity=(target_entity or "")[:50] or None,
+        target_id=(target_id or "")[:100] or None,
+        ip_address=(ip_address or "")[:45] or None,
+        user_agent=(user_agent or "")[:500] or None,
+        detail_json=json.dumps(detail, default=str) if detail is not None else None,
+    )
+    db.add(entry)
+    await db.commit()
+    await db.refresh(entry)
+    return entry
+
+
+async def get_audit_logs(
+    db: AsyncSession,
+    page: int = 1,
+    limit: int = 100,
+    username: Optional[str] = None,
+    action_type: Optional[str] = None,
+    target_entity: Optional[str] = None,
+) -> Tuple[List[AuditLogModel], int]:
+    filters = []
+    if username:
+        filters.append(AuditLogModel.username == username)
+    if action_type:
+        filters.append(AuditLogModel.action_type == action_type)
+    if target_entity:
+        filters.append(AuditLogModel.target_entity == target_entity)
+    count_stmt = select(func.count(AuditLogModel.id))
+    query = select(AuditLogModel)
+    if filters:
+        condition = and_(*filters)
+        count_stmt = count_stmt.where(condition)
+        query = query.where(condition)
+    count_res = await db.execute(count_stmt)
+    total = int(count_res.scalar() or 0)
+    query = (
+        query.order_by(AuditLogModel.timestamp.desc())
+        .offset((page - 1) * limit)
+        .limit(limit)
+    )
+    res = await db.execute(query)
+    return list(res.scalars().all()), total
+
+
+async def get_users(db: AsyncSession) -> List[UserModel]:
+    res = await db.execute(select(UserModel).order_by(UserModel.username.asc()))
+    return list(res.scalars().all())
+
+
+async def get_user_by_username(
+    db: AsyncSession, username: str
+) -> Optional[UserModel]:
+    res = await db.execute(
+        select(UserModel).where(UserModel.username == username)
+    )
+    return res.scalar_one_or_none()
+
+
+async def create_user(db: AsyncSession, user_data: Dict[str, Any]) -> UserModel:
+    user = UserModel(
+        username=str(user_data["username"]).strip(),
+        password_hash=str(user_data["password_hash"]),
+        role=str(user_data.get("role", "viewer")).lower(),
+        full_name=user_data.get("full_name"),
+        email=user_data.get("email"),
+        is_active=1,
+        created_at=time.time(),
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+async def update_user(
+    db: AsyncSession, user_id: int, values: Dict[str, Any]
+) -> Optional[UserModel]:
+    allowed = {"role", "full_name", "email", "is_active", "password_hash"}
+    clean_values = {k: v for k, v in values.items() if k in allowed}
+    if clean_values:
+        await db.execute(
+            update(UserModel).where(UserModel.id == user_id).values(**clean_values)
+        )
+        await db.commit()
+    res = await db.execute(select(UserModel).where(UserModel.id == user_id))
+    return res.scalar_one_or_none()
+
+
+async def delete_user(db: AsyncSession, user_id: int) -> Optional[UserModel]:
+    result = await db.execute(select(UserModel).where(UserModel.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        return None
+    snapshot = UserModel(
+        id=user.id,
+        username=user.username,
+        password_hash="",
+        role=user.role,
+        full_name=user.full_name,
+        email=user.email,
+        is_active=user.is_active,
+        created_at=user.created_at,
+        last_login=user.last_login,
+    )
+    await db.delete(user)
+    await db.commit()
+    return snapshot
+
+
+async def create_system_event(
+    db: AsyncSession,
+    event_type: str,
+    severity: str,
+    source: str,
+    message: str,
+    detail: Optional[Dict[str, Any]] = None,
+) -> SystemEventModel:
+    event = SystemEventModel(
+        timestamp=time.time(),
+        event_type=event_type[:50],
+        severity=severity[:20].upper(),
+        source=source[:50],
+        message=message,
+        detail_json=json.dumps(detail, default=str) if detail is not None else None,
+    )
+    db.add(event)
+    await db.commit()
+    await db.refresh(event)
+    return event
+
+
+async def get_pending_feedback(
+    db: AsyncSession, limit: int = 1000
+) -> List[AlertFeedbackModel]:
+    stmt = (
+        select(AlertFeedbackModel)
+        .where(AlertFeedbackModel.processed_at.is_(None))
+        .order_by(AlertFeedbackModel.created_at.asc())
+        .limit(limit)
+    )
+    res = await db.execute(stmt)
+    return list(res.scalars().all())
+
+
+async def mark_feedback_processed(
+    db: AsyncSession, feedback_ids: List[int], model_version: str
+) -> int:
+    if not feedback_ids:
+        return 0
+    result = await db.execute(
+        update(AlertFeedbackModel)
+        .where(AlertFeedbackModel.id.in_(feedback_ids))
+        .values(processed_at=time.time(), model_version=model_version)
+    )
+    await db.commit()
+    return int(result.rowcount or 0)
 
 
 # ================= RETENTION CLEANUP =================

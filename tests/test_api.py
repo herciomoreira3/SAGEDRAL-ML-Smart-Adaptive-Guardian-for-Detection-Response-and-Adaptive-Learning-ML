@@ -117,8 +117,10 @@ async def test_get_model_info_endpoint(client, auth_headers):
 
 
 @pytest.mark.asyncio
-async def test_capture_stats_unavailable_in_api_only(client):
-    res = await client.get("/api/v1/capture/stats")
+async def test_capture_stats_unavailable_in_api_only(client, auth_headers):
+    unauthenticated = await client.get("/api/v1/capture/stats")
+    assert unauthenticated.status_code == 401
+    res = await client.get("/api/v1/capture/stats", headers=auth_headers)
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "unavailable"

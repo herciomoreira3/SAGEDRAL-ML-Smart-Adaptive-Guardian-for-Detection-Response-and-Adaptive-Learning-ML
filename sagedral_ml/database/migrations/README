@@ -1,0 +1,6 @@
+SAGEDRAL-ML Alembic migrations.
+
+The 20260726 baseline marks the enterprise schema represented by the ORM.
+Existing v1 SQLite installations are first made compatible by the additive
+migration in connection.py; subsequent releases should add normal Alembic
+revision files here.

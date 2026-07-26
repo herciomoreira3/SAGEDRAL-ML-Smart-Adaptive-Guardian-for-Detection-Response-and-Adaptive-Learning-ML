@@ -22,6 +22,12 @@ class AlertItem(BaseModel):
     ml_anomaly_score: Optional[float] = None
     flow_duration: Optional[float] = None
     total_bytes: Optional[int] = None
+    src_country: Optional[str] = None
+    src_country_code: Optional[str] = None
+    status: Optional[str] = "open"
+    feedback_label: Optional[str] = None
+    feedback_notes: Optional[str] = None
+    closed_at: Optional[float] = None
 
 
 class AlertListResponse(BaseModel):

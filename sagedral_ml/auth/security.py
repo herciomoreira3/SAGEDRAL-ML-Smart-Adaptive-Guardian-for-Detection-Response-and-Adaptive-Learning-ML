@@ -50,6 +50,34 @@ ROLE_ANALYST = "analyst"
 ROLE_VIEWER = "viewer"
 VALID_ROLES = (ROLE_ADMIN, ROLE_ANALYST, ROLE_VIEWER)
 
+PERMISSION_VIEW = "view"
+PERMISSION_EXPORT = "export"
+PERMISSION_RESPOND = "respond"
+PERMISSION_FEEDBACK = "feedback"
+PERMISSION_MANAGE_CONFIG = "manage_config"
+PERMISSION_MANAGE_RULES = "manage_rules"
+PERMISSION_MANAGE_WHITELIST = "manage_whitelist"
+PERMISSION_MANAGE_USERS = "manage_users"
+ROLE_PERMISSIONS = {
+    ROLE_VIEWER: {PERMISSION_VIEW, PERMISSION_EXPORT},
+    ROLE_ANALYST: {
+        PERMISSION_VIEW,
+        PERMISSION_EXPORT,
+        PERMISSION_RESPOND,
+        PERMISSION_FEEDBACK,
+    },
+    ROLE_ADMIN: {
+        PERMISSION_VIEW,
+        PERMISSION_EXPORT,
+        PERMISSION_RESPOND,
+        PERMISSION_FEEDBACK,
+        PERMISSION_MANAGE_CONFIG,
+        PERMISSION_MANAGE_RULES,
+        PERMISSION_MANAGE_WHITELIST,
+        PERMISSION_MANAGE_USERS,
+    },
+}
+
 _generated_secret_cache: Optional[str] = None
 _FALLBACK_HASH_PREFIX = "pbkdf2_sha256"
 _FALLBACK_HASH_ROUNDS = 210_000
@@ -76,18 +104,105 @@ def get_jwt_secret_key() -> str:
     global _generated_secret_cache
     config = get_config()
     secret_key = config.get("auth", "secret_key", "")
-    if secret_key and isinstance(secret_key, str) and len(secret_key.strip()) >= 16:
+    if secret_key and isinstance(secret_key, str) and len(secret_key.strip()) >= 32:
         return secret_key.strip()
 
     if _generated_secret_cache:
         return _generated_secret_cache
 
-    logger.warning(
-        "[auth] secret_key kosong atau terlalu pendek! "
-        "Generate random secret untuk session ini (TIDAK persist restart). "
-        "HARAP isi [auth] secret_key di config.toml untuk production!"
+    data_dir = str(
+        config.get("general", "data_dir", "/var/lib/sagedral-ml") or "."
     )
-    _generated_secret_cache = secrets.token_urlsafe(64)
+    secret_path = str(
+        config.get("auth", "jwt_secret_file", "")
+        or os.path.join(data_dir, ".sagedral-jwt-secret")
+    )
+    try:
+        if os.path.exists(secret_path):
+            with open(secret_path, "r", encoding="utf-8") as handle:
+                persisted = handle.read().strip()
+            if len(persisted) >= 32:
+                _generated_secret_cache = persisted
+                return persisted
+            logger.warning(
+                "JWT secret file %s is too short; replacing it securely.",
+                secret_path,
+            )
+        secret_dir = os.path.dirname(secret_path)
+        if secret_dir:
+            os.makedirs(secret_dir, exist_ok=True)
+        lock_path = secret_path + ".lock"
+        lock_descriptor = None
+        for _attempt in range(100):
+            try:
+                lock_descriptor = os.open(
+                    lock_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                os.close(lock_descriptor)
+                lock_descriptor = None
+                break
+            except FileExistsError:
+                try:
+                    with open(secret_path, "r", encoding="utf-8") as handle:
+                        candidate = handle.read().strip()
+                    if len(candidate) >= 32:
+                        _generated_secret_cache = candidate
+                        return candidate
+                except OSError:
+                    pass
+                time.sleep(0.05)
+        else:
+            raise RuntimeError("timed out waiting for JWT secret file lock")
+
+        generated = secrets.token_urlsafe(64)
+        temporary_path = secret_path + ".tmp-%s-%s" % (
+            os.getpid(),
+            secrets.token_hex(4),
+        )
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        try:
+            descriptor = os.open(temporary_path, flags, 0o600)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(generated)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary_path, secret_path)
+                try:
+                    os.chmod(secret_path, 0o600)
+                except OSError:
+                    pass
+            finally:
+                try:
+                    if os.path.exists(temporary_path):
+                        os.unlink(temporary_path)
+                except OSError:
+                    pass
+        finally:
+            try:
+                os.unlink(lock_path)
+            except OSError:
+                pass
+        _generated_secret_cache = generated
+        logger.warning(
+            "[auth] secret_key config kosong; generated persistent JWT secret at %s",
+            secret_path,
+        )
+    except FileExistsError:
+        with open(secret_path, "r", encoding="utf-8") as handle:
+            candidate = handle.read().strip()
+        _generated_secret_cache = (
+            candidate if len(candidate) >= 32 else secrets.token_urlsafe(64)
+        )
+    except Exception as exc:
+        logger.critical(
+            "Tidak dapat mempersist JWT secret ke %s (%s); memakai secret sesi.",
+            secret_path,
+            exc,
+        )
+        _generated_secret_cache = secrets.token_urlsafe(64)
     return _generated_secret_cache
 
 
@@ -313,6 +428,20 @@ def require_roles(*roles: str):
     return _check_role
 
 
+def require_permission(permission: str):
+    """FastAPI dependency for stable per-action authorization."""
+    async def _check_permission(user: Any = Depends(get_current_user)) -> Any:
+        role = getattr(user, "role", ROLE_VIEWER) or ROLE_VIEWER
+        if permission not in ROLE_PERMISSIONS.get(role, set()):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Akses ditolak untuk aksi '%s'." % permission,
+            )
+        return user
+
+    return _check_permission
+
+
 async def seed_default_admin(db: AsyncSession) -> bool:
     from sagedral_ml.database.models import UserModel
 
@@ -359,21 +488,50 @@ async def seed_default_admin(db: AsyncSession) -> bool:
                 secret_dir = os.path.dirname(secret_file)
                 if secret_dir:
                     os.makedirs(secret_dir, exist_ok=True)
-                with open(secret_file, "w", encoding="utf-8") as f:
-                    f.write(f"username={admin_username}\npassword={admin_password}\n")
+                output_secret_file = secret_file
                 try:
-                    os.chmod(secret_file, 0o600)
+                    descriptor = os.open(
+                        output_secret_file,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                    )
+                except FileExistsError:
+                    output_secret_file = "%s.new-%d" % (
+                        secret_file,
+                        int(time.time()),
+                    )
+                    descriptor = os.open(
+                        output_secret_file,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                    )
+                with os.fdopen(descriptor, "w", encoding="utf-8") as f:
+                    f.write(
+                        "username=%s\npassword=%s\n"
+                        % (admin_username, admin_password)
+                    )
+                try:
+                    os.chmod(output_secret_file, 0o600)
                 except Exception:
                     pass
                 logger.warning(
                     f"Generated first admin password for '{admin_username}'. "
-                    f"Secret saved to {secret_file} (chmod 600 when supported)."
+                    f"Secret saved to {output_secret_file} (chmod 600 when supported)."
                 )
             except Exception as e:
                 logger.critical(
-                    f"Generated first admin password for '{admin_username}' but failed to write secret file: {e}. "
-                    f"TEMP PASSWORD: {admin_password}"
+                    "Generated first admin password for '%s' but failed to "
+                    "write the secret file: %s. Disable the account or reset "
+                    "its password from an offline administrative session.",
+                    admin_username,
+                    e,
                 )
+                try:
+                    await db.delete(admin)
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                return False
 
         logger.info(
             f"Default admin user seeded: username='{admin_username}' role='{ROLE_ADMIN}'. "

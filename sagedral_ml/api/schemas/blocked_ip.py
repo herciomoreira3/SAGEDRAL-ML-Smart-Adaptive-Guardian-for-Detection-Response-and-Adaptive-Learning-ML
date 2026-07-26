@@ -7,9 +7,9 @@ from pydantic import BaseModel, Field
 
 
 class BlockIPRequest(BaseModel):
-    ip: str
-    reason: Optional[str] = "Manual block by admin"
-    duration_seconds: Optional[int] = 3600
+    ip: str = Field(..., min_length=2, max_length=45)
+    reason: Optional[str] = Field("Manual block by admin", max_length=1000)
+    duration_seconds: Optional[int] = Field(3600, ge=0, le=31536000)
 
 
 class BlockedIPItem(BaseModel):

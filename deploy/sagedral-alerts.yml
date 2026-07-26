@@ -1,0 +1,21 @@
+groups:
+  - name: sagedral
+    rules:
+      - alert: SagedralDown
+        expr: up{job="sagedral-ml"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SAGEDRAL-ML la ativu"
+      - alert: SagedralCaptureDrops
+        expr: |
+          increase(sagedral_capture_drops_total[5m])
+          /
+          clamp_min(increase(sagedral_capture_packets_total[5m]), 1)
+          > 0.02
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Taxa pakote lakon liu 2%"

@@ -13,9 +13,7 @@ router = APIRouter(prefix="/api/v1/model", tags=["ML Model"])
 
 
 def _get_ml_engine():
-    if global_container is not None:
-        return getattr(global_container, "ml_engine", None) or getattr(router, "ml_engine", None)
-    return getattr(router, "ml_engine", None)
+    return global_container.ml_engine
 
 
 @router.get("/info", dependencies=[Depends(get_current_user)])
@@ -27,6 +25,15 @@ async def get_model_info(_user=Depends(get_current_user)):
     global_ml_engine = _get_ml_engine()
     loaded = global_ml_engine.model_loaded if global_ml_engine else False
     model_version = global_ml_engine.version if global_ml_engine else "none"
+    metadata = (
+        global_ml_engine.model_metadata
+        if global_ml_engine is not None
+        else {}
+    )
+    is_fallback = any(
+        marker in model_version.lower()
+        for marker in ("fallback", "rulebased", "none", "unattached")
+    )
 
     return {
         "enabled": ml_enabled,
@@ -37,9 +44,9 @@ async def get_model_info(_user=Depends(get_current_user)):
             "version": model_version,
             "type": "LightGBM Binary Anomaly Classifier",
             "n_features": 28,
-            "accuracy": 0.965 if "fallback" not in model_version else None,
-            "f1_score": 0.952 if "fallback" not in model_version else None,
-            "note": None if "fallback" not in model_version else "Fallback model generated from synthetic data. Train with real dataset for production accuracy.",
+            "accuracy": metadata.get("anomaly_accuracy") if not is_fallback else None,
+            "f1_score": metadata.get("anomaly_f1") if not is_fallback else None,
+            "note": None if not is_fallback else "Fallback model active. Train with a labeled production dataset before relying on ML accuracy.",
         },
         "classifier_model": {
             "version": model_version,
@@ -55,7 +62,7 @@ async def get_model_info(_user=Depends(get_current_user)):
                 "Infiltration",
                 "Exfiltration",
             ],
-            "accuracy": 0.941 if "fallback" not in model_version else None,
-            "note": None if "fallback" not in model_version else "Fallback model generated from synthetic data. Train with real dataset for production accuracy.",
+            "accuracy": metadata.get("classifier_accuracy") if not is_fallback else None,
+            "note": None if not is_fallback else "Fallback model active. Train with a labeled production dataset before relying on ML accuracy.",
         },
     }

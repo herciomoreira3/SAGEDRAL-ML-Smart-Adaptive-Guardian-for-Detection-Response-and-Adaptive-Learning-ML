@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { getAlerts, blockIP } from '../api/client';
+import { getAlerts, blockIP, downloadAlertsCSV, submitAlertFeedback } from '../api/client';
 import { SeverityBadge } from '../components/SeverityBadge';
 import { AlertDetailModal } from '../components/AlertDetailModal';
 import { ConfirmDialog } from '../components/ConfirmDialog';
@@ -60,29 +60,30 @@ export function Alerts() {
     }
   };
 
-  const exportCSV = () => {
-    if (!alerts.length) return;
-    const headers = [T.modal_timestamp, T.col_src_ip, T.col_dst_ip, T.col_attack, T.col_severity, T.col_score, T.col_action];
-    const rows = alerts.map(a => [
-      new Date(a.timestamp * 1000).toISOString(),
-      a.src_ip,
-      a.dst_ip,
-      a.attack_type,
-      a.severity,
-      a.final_score,
-      a.action_taken,
-    ]);
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `sagedral_alerts_${Date.now()}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  const exportCSV = async () => {
+    try {
+      await downloadAlertsCSV({
+        severity: severity || undefined,
+        attack_type: attackType || undefined,
+        src_ip: srcIp || undefined,
+      });
+    } catch {
+      toast.error(T.generic_error);
+    }
   };
 
   const totalPages = Math.ceil(total / 25) || 1;
+
+  const handleFeedback = async (alertId, label) => {
+    try {
+      await submitAlertFeedback(alertId, { label, notes: '' });
+      toast.success(T.modal_feedback_saved);
+      setSelectedAlert(null);
+      fetchAlerts();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || T.generic_error);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -215,6 +216,7 @@ export function Alerts() {
         alert={selectedAlert}
         onClose={() => setSelectedAlert(null)}
         onBlock={requestBlock}
+        onFeedback={handleFeedback}
       />
 
       <ConfirmDialog

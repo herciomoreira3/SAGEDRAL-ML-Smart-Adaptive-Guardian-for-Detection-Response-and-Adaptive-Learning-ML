@@ -22,10 +22,16 @@ export function Login() {
 
     setLoading(true);
     try {
-      const res = await axios.post('/api/v1/auth/login', { username, password });
+      const form = new URLSearchParams();
+      form.set('username', username);
+      form.set('password', password);
+      const res = await axios.post('/api/v1/auth/login', form, {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      });
       const token = res.data?.token || res.data?.access_token;
       if (token) {
         localStorage.setItem('sagedral_token', token);
+        localStorage.setItem('sagedral_user', JSON.stringify(res.data?.user || {}));
         toast.success(T.login_success);
         navigate(from, { replace: true });
       } else {
@@ -128,7 +134,7 @@ export function Login() {
         </div>
 
         <p className="text-center text-[11px] text-slate-600 mt-4 font-mono">
-          SAGEDRAL-ML Smart Adaptive Guardian
+          SAGEDRAL-ML Guarda Adaptativu Intelijente
         </p>
       </div>
     </div>

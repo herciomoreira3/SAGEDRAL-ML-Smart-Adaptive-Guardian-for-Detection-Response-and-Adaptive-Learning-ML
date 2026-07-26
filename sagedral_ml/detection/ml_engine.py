@@ -5,6 +5,8 @@ MLEngine class for two-stage anomaly detection and attack classification using L
 import os
 import json
 import logging
+import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Dict, List, Any, Optional
 import numpy as np
@@ -47,12 +49,11 @@ class RuleBasedFallbackModel:
         self.n_features_in_ = len(FEATURE_NAMES)
 
     @staticmethod
-    def _row_from_X(X):
-        if isinstance(X, np.ndarray):
-            if X.ndim == 2:
-                return X[0].astype(float)
-            return X.astype(float)
-        return np.asarray(X, dtype=float).flatten()
+    def _rows_from_X(X):
+        rows = np.asarray(X, dtype=float)
+        if rows.ndim == 1:
+            rows = rows.reshape(1, -1)
+        return rows
 
     @staticmethod
     def _score(row):
@@ -80,10 +81,11 @@ class RuleBasedFallbackModel:
         return float(np.clip(score, 0.0, 1.0))
 
     def predict_proba(self, X):
-        row = self._row_from_X(X)
-        a_score = self._score(row)
-        n_score = 1.0 - a_score
-        return np.array([[n_score, a_score]], dtype=np.float32)
+        probabilities = []
+        for row in self._rows_from_X(X):
+            a_score = self._score(row)
+            probabilities.append([1.0 - a_score, a_score])
+        return np.asarray(probabilities, dtype=np.float32)
 
     def predict(self, X):
         probs = self.predict_proba(X)
@@ -99,15 +101,13 @@ class RuleBasedFallbackClassifier:
         self.n_features_in_ = len(FEATURE_NAMES)
 
     @staticmethod
-    def _row_from_X(X):
-        if isinstance(X, np.ndarray):
-            if X.ndim == 2:
-                return X[0].astype(float)
-            return X.astype(float)
-        return np.asarray(X, dtype=float).flatten()
+    def _rows_from_X(X):
+        rows = np.asarray(X, dtype=float)
+        if rows.ndim == 1:
+            rows = rows.reshape(1, -1)
+        return rows
 
-    def predict_proba(self, X):
-        row = self._row_from_X(X)
+    def _row_probabilities(self, row):
         idx = {name: i for i, name in enumerate(FEATURE_NAMES)}
         pps = float(row[idx["flow_packets_per_sec"]])
         bps = float(row[idx["flow_bytes_per_sec"]])
@@ -141,12 +141,21 @@ class RuleBasedFallbackClassifier:
         raw = np.array([scores[c] for c in names], dtype=np.float32)
         exp = np.exp(raw - raw.max())
         probs = exp / exp.sum()
-        return probs.reshape(1, -1)
+        return probs
+
+    def predict_proba(self, X):
+        return np.asarray(
+            [
+                self._row_probabilities(row)
+                for row in self._rows_from_X(X)
+            ],
+            dtype=np.float32,
+        )
 
     def predict(self, X):
         probs = self.predict_proba(X)
-        idx = int(np.argmax(probs[0]))
-        return np.array([self.classes_[idx]])
+        indexes = np.argmax(probs, axis=1)
+        return np.asarray([self.classes_[int(index)] for index in indexes])
 
 
 @dataclass
@@ -180,9 +189,25 @@ class MLEngine:
         self.feature_names = FEATURE_NAMES
         self.model_loaded = False
         self.version = "1.0.0"
+        self.model_profile: Dict[str, Any] = {}
+        self.model_metadata: Dict[str, Any] = {}
+        self._drift_window = deque(maxlen=100)
+        self._drift_status: Dict[str, Any] = {
+            "detected": False,
+            "psi": 0.0,
+            "sample_count": 0,
+            "checked_at": None,
+        }
 
         if self.enabled:
             self.load_models()
+
+    def configure_drift(self, window_size: int = 100) -> None:
+        """Set runtime drift window without changing model artifacts."""
+        self._drift_window = deque(
+            list(self._drift_window)[-max(10, int(window_size)):],
+            maxlen=max(10, int(window_size)),
+        )
 
     def _create_rulebased_fallback(self) -> bool:
         """Load zero-dependency rule-based fallback models (always succeeds)."""
@@ -194,12 +219,28 @@ class MLEngine:
             anomaly_path = os.path.join(self.model_dir, "anomaly_detector.pkl")
             classifier_path = os.path.join(self.model_dir, "attack_classifier.pkl")
             features_path = os.path.join(self.model_dir, "feature_names.json")
+            metadata_path = os.path.join(self.model_dir, "model_metadata.json")
+            profile_path = os.path.join(self.model_dir, "model_profile.json")
 
             try:
                 joblib.dump(anomaly_model, anomaly_path)
                 joblib.dump(classifier_model, classifier_path)
                 with open(features_path, "w") as f:
                     json.dump(FEATURE_NAMES, f, indent=2)
+                with open(metadata_path, "w") as f:
+                    json.dump(
+                        {
+                            "version": "1.0.0-rulebased",
+                            "source": "rulebased-fallback",
+                            "generated_at": time.time(),
+                        },
+                        f,
+                        indent=2,
+                    )
+                try:
+                    os.unlink(profile_path)
+                except OSError:
+                    pass
             except (OSError, PermissionError) as e:
                 logger.warning(f"Could not persist rule-based fallback models to {self.model_dir}: {e}")
 
@@ -282,12 +323,32 @@ class MLEngine:
                 anomaly_path = os.path.join(self.model_dir, "anomaly_detector.pkl")
                 classifier_path = os.path.join(self.model_dir, "attack_classifier.pkl")
                 features_path = os.path.join(self.model_dir, "feature_names.json")
+                metadata_path = os.path.join(
+                    self.model_dir, "model_metadata.json"
+                )
+                profile_path = os.path.join(
+                    self.model_dir, "model_profile.json"
+                )
 
                 try:
                     joblib.dump(anomaly_model, anomaly_path)
                     joblib.dump(classifier_model, classifier_path)
                     with open(features_path, "w") as f:
                         json.dump(FEATURE_NAMES, f, indent=2)
+                    with open(metadata_path, "w") as f:
+                        json.dump(
+                            {
+                                "version": "1.0.0-fallback",
+                                "source": "synthetic-fallback",
+                                "generated_at": time.time(),
+                            },
+                            f,
+                            indent=2,
+                        )
+                    try:
+                        os.unlink(profile_path)
+                    except OSError:
+                        pass
                 except (OSError, PermissionError) as e:
                     logger.warning(f"Could not persist fallback models to {self.model_dir}: {e}. Using in-memory models only.")
 
@@ -310,9 +371,14 @@ class MLEngine:
 
     def load_models(self) -> bool:
         """Load binary anomaly detector and multiclass attack classifier models."""
+        self.model_profile = {}
+        self.model_metadata = {}
+        self.version = "1.0.0"
         anomaly_path = os.path.join(self.model_dir, "anomaly_detector.pkl")
         classifier_path = os.path.join(self.model_dir, "attack_classifier.pkl")
         features_path = os.path.join(self.model_dir, "feature_names.json")
+        profile_path = os.path.join(self.model_dir, "model_profile.json")
+        metadata_path = os.path.join(self.model_dir, "model_metadata.json")
 
         if not os.path.exists(anomaly_path):
             logger.warning(f"ML anomaly model not found at {anomaly_path}. Generating fallback models...")
@@ -326,6 +392,17 @@ class MLEngine:
             if os.path.exists(features_path):
                 with open(features_path, "r") as f:
                     self.feature_names = json.load(f)
+            if os.path.exists(profile_path):
+                with open(profile_path, "r") as f:
+                    loaded_profile = json.load(f)
+                if isinstance(loaded_profile, dict):
+                    self.model_profile = loaded_profile
+            if os.path.exists(metadata_path):
+                with open(metadata_path, "r") as f:
+                    metadata = json.load(f)
+                if isinstance(metadata, dict):
+                    self.model_metadata = metadata
+                    self.version = str(metadata.get("version", self.version))
 
             self.model_loaded = True
             logger.info("Successfully loaded ML detection models.")
@@ -333,6 +410,135 @@ class MLEngine:
         except Exception as e:
             logger.error(f"Failed to load ML models from {self.model_dir}: {e}. Attempting fallback models...")
             return self._create_fallback_models()
+
+    def _track_drift_row(self, row: List[float]) -> None:
+        self._drift_window.append(np.asarray(row, dtype=np.float64))
+        if (
+            not self.model_profile
+            or len(self._drift_window) < self._drift_window.maxlen
+        ):
+            self._drift_status["sample_count"] = len(self._drift_window)
+            return
+        means = self.model_profile.get("feature_mean", {})
+        stds = self.model_profile.get("feature_std", {})
+        if not isinstance(means, dict) or not isinstance(stds, dict):
+            return
+        matrix = np.vstack(self._drift_window)
+        expected = np.asarray(
+            [0.0228, 0.1359, 0.3413, 0.3413, 0.1359, 0.0228],
+            dtype=np.float64,
+        )
+        psi_values = []
+        for index, name in enumerate(self.feature_names):
+            std = max(float(stds.get(name, 0.0) or 0.0), 1e-9)
+            mean = float(means.get(name, 0.0) or 0.0)
+            edges = np.asarray(
+                [
+                    -np.inf,
+                    mean - 2 * std,
+                    mean - std,
+                    mean,
+                    mean + std,
+                    mean + 2 * std,
+                    np.inf,
+                ]
+            )
+            counts, _ = np.histogram(matrix[:, index], bins=edges)
+            observed = counts.astype(np.float64) / max(float(counts.sum()), 1.0)
+            observed = np.clip(observed, 1e-6, None)
+            exp_safe = np.clip(expected, 1e-6, None)
+            psi_values.append(
+                float(np.sum((observed - exp_safe) * np.log(observed / exp_safe)))
+            )
+        psi = float(np.mean(psi_values)) if psi_values else 0.0
+        self._drift_status = {
+            "detected": psi > 0.25,
+            "psi": psi,
+            "sample_count": len(self._drift_window),
+            "checked_at": time.time(),
+        }
+
+    def get_drift_status(self, threshold: float = 0.25) -> Dict[str, Any]:
+        status = dict(self._drift_status)
+        status["threshold"] = float(threshold)
+        status["detected"] = float(status.get("psi", 0.0)) > float(threshold)
+        status["profile_loaded"] = bool(self.model_profile)
+        return status
+
+    def predict_batch(
+        self, feature_vectors: List[Dict[str, Any]]
+    ) -> List[MLResult]:
+        """Run both model stages in vectorized batches."""
+        if not feature_vectors:
+            return []
+        if not self.enabled or not self.model_loaded or self.anomaly_model is None:
+            return [MLResult(model_version="none") for _ in feature_vectors]
+        try:
+            rows = [
+                [float(vector.get(name, 0.0)) for name in self.feature_names]
+                for vector in feature_vectors
+            ]
+            x_arr = np.asarray(rows, dtype=np.float32)
+            if hasattr(self.anomaly_model, "predict_proba"):
+                raw = self.anomaly_model.predict_proba(x_arr)
+                scores = raw[:, 1] if raw.shape[1] > 1 else raw[:, 0]
+            else:
+                scores = np.asarray(self.anomaly_model.predict(x_arr), dtype=float)
+            results = []
+            anomaly_indexes = [
+                index
+                for index, score in enumerate(scores)
+                if float(score) >= self.anomaly_threshold
+            ]
+            classified = {}
+            if anomaly_indexes and self.classifier_model is not None:
+                subset = x_arr[anomaly_indexes]
+                if hasattr(self.classifier_model, "predict_proba"):
+                    class_probs = self.classifier_model.predict_proba(subset)
+                    classes = getattr(self.classifier_model, "classes_", None)
+                    for local_index, source_index in enumerate(anomaly_indexes):
+                        top_index = int(np.argmax(class_probs[local_index]))
+                        confidence = float(class_probs[local_index][top_index])
+                        class_name = (
+                            str(classes[top_index])
+                            if classes is not None and top_index < len(classes)
+                            else "Anomaly_Class_%d" % top_index
+                        )
+                        classified[source_index] = (class_name, confidence)
+                else:
+                    predictions = self.classifier_model.predict(subset)
+                    for local_index, source_index in enumerate(anomaly_indexes):
+                        classified[source_index] = (
+                            str(predictions[local_index]),
+                            float(scores[source_index]),
+                        )
+            for index, score_value in enumerate(scores):
+                score = float(score_value)
+                is_anomaly = score >= self.anomaly_threshold
+                attack_class, confidence = classified.get(
+                    index,
+                    ("NORMAL", 1.0 - score if not is_anomaly else score),
+                )
+                if (
+                    is_anomaly
+                    and confidence < self.classifier_threshold
+                    and attack_class != "NORMAL"
+                ):
+                    attack_class = "Unknown_Anomaly"
+                self._track_drift_row(rows[index])
+                results.append(
+                    MLResult(
+                        anomaly_score=score,
+                        is_anomaly=is_anomaly,
+                        attack_class=attack_class,
+                        class_confidence=float(confidence),
+                        model_version=self.version,
+                    )
+                )
+            return results
+        except Exception as exc:
+            logger.error("Error during batch ML prediction: %s", exc)
+            return [MLResult(model_version="error") for _ in feature_vectors]
 
     def predict(self, feature_vector: Dict[str, Any]) -> MLResult:
         if not self.enabled or not self.model_loaded or self.anomaly_model is None:
@@ -348,6 +554,7 @@ class MLEngine:
             # Construct array in strict feature order
             row = [float(feature_vector.get(name, 0.0)) for name in self.feature_names]
             x_arr = np.array([row], dtype=np.float32)
+            self._track_drift_row(row)
 
             # Stage 1: Anomaly Detection
             if hasattr(self.anomaly_model, "predict_proba"):

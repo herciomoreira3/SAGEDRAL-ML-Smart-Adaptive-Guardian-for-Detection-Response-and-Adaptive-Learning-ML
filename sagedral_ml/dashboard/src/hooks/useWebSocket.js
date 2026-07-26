@@ -17,11 +17,17 @@ export function useWebSocket() {
 
   const connect = useCallback(() => {
     try {
+      const token = localStorage.getItem('sagedral_token');
+      if (!token) {
+        setConnected(false);
+        return;
+      }
       const url = getWsUrl();
       ws.current = new WebSocket(url);
 
       ws.current.onopen = () => {
         setConnected(true);
+        ws.current.send(JSON.stringify({ action: 'subscribe', topic: '*' }));
       };
 
       ws.current.onclose = () => {
@@ -36,6 +42,10 @@ export function useWebSocket() {
       ws.current.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
+          if (msg.event === 'ping') {
+            ws.current?.send(JSON.stringify({ action: 'ping' }));
+            return;
+          }
           if (msg.event === 'new_alert') setLastAlert(msg.data);
           if (msg.event === 'traffic_stats') setTrafficStats(msg.data);
           if (msg.event === 'system_status') setSystemStatus(msg.data);

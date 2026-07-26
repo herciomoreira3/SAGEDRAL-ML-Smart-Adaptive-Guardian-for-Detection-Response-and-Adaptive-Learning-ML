@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: sagedral-ml
+    static_configs:
+      - targets: ["127.0.0.1:8000"]
+
+rule_files:
+  - /etc/prometheus/sagedral-alerts.yml

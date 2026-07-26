@@ -26,6 +26,10 @@ def configure_test_environment():
     )
     test_cfg_path = os.path.join(os.environ.get("TEMP", "/tmp"), "sagedral-pytest-config.toml")
     test_cfg["general"]["data_dir"] = os.path.join(os.environ.get("TEMP", "/tmp"), "sagedral-pytest-data")
+    try:
+        os.remove(test_cfg_path)
+    except OSError:
+        pass
 
     sys._sagedral_base_config = test_cfg
     import sagedral_ml.config as config_mod
@@ -48,3 +52,7 @@ def configure_test_environment():
             os.remove(db_path + suffix)
         except OSError:
             pass
+    try:
+        os.remove(test_cfg_path)
+    except OSError:
+        pass

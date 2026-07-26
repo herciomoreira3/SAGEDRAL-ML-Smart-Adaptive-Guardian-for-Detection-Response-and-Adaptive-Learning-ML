@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -51,7 +52,8 @@ class DatabaseBackupManager:
     def _list_backups(self) -> List[Path]:
         backup_dir = self._backup_dir()
         files = sorted(
-            list(backup_dir.glob("sagedral-*.db.gz")),
+            list(backup_dir.glob("sagedral-*.db.gz"))
+            + list(backup_dir.glob("sagedral-*.sql.gz")),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
@@ -82,6 +84,12 @@ class DatabaseBackupManager:
 
         Returns the path to the created ``.db.gz`` file, or ``None`` on failure.
         """
+        backend = str(
+            self.config.get("database", "backend", "sqlite") or "sqlite"
+        ).lower()
+        if backend == "postgresql":
+            return self._run_postgresql_backup(output_path)
+
         db_path = self._db_path()
         if not os.path.exists(db_path):
             logger.warning(f"Database file not found, skip backup: {db_path}")
@@ -112,6 +120,45 @@ class DatabaseBackupManager:
             try:
                 if tmp_copy.exists():
                     tmp_copy.unlink()
+            except Exception:
+                pass
+            return None
+
+    def _run_postgresql_backup(
+        self, output_path: Optional[str] = None
+    ) -> Optional[str]:
+        connection_string = str(
+            self.config.get("database", "connection_string", "") or ""
+        ).replace("+asyncpg", "")
+        if not connection_string:
+            logger.error("PostgreSQL backup requires database.connection_string")
+            return None
+        ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        destination = (
+            Path(output_path)
+            if output_path
+            else self._backup_dir() / ("sagedral-%s.sql.gz" % ts)
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            process = subprocess.Popen(
+                ["pg_dump", "--no-owner", "--no-acl", connection_string],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            with gzip.open(destination, "wb", compresslevel=6) as handle:
+                if process.stdout is None:
+                    raise RuntimeError("pg_dump stdout unavailable")
+                shutil.copyfileobj(process.stdout, handle)
+            stderr = process.communicate(timeout=300)[1]
+            if process.returncode != 0:
+                raise RuntimeError(stderr.decode("utf-8", errors="replace"))
+            self._apply_retention()
+            return str(destination)
+        except Exception as exc:
+            logger.error("PostgreSQL backup failed: %s", exc)
+            try:
+                destination.unlink()
             except Exception:
                 pass
             return None

@@ -1,5 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { getBlockedIPs, blockIP, unblockIP } from '../api/client';
+import {
+  getBlockedIPs,
+  blockIP,
+  unblockIP,
+  getWhitelist,
+  addWhitelist,
+  removeWhitelist,
+} from '../api/client';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { useTranslation } from '../i18n/hook';
 import { Ban, ShieldCheck, Plus, Trash2 } from 'lucide-react';
@@ -14,6 +21,10 @@ export function BlockedIPs() {
   const [loading, setLoading] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pendingUnblockIp, setPendingUnblockIp] = useState(null);
+  const [whitelist, setWhitelist] = useState([]);
+  const [whitelistInput, setWhitelistInput] = useState('');
+  const [whitelistNote, setWhitelistNote] = useState('');
+  const [pendingWhitelistRemoval, setPendingWhitelistRemoval] = useState(null);
 
   const fetchBlocked = async () => {
     try {
@@ -26,7 +37,42 @@ export function BlockedIPs() {
 
   useEffect(() => {
     fetchBlocked();
+    fetchWhitelist();
   }, []);
+
+  const fetchWhitelist = async () => {
+    try {
+      const response = await getWhitelist();
+      setWhitelist(response.data || []);
+    } catch {
+      toast.error(T.whitelist_fetch_fail);
+    }
+  };
+
+  const handleWhitelistAdd = async (event) => {
+    event.preventDefault();
+    if (!whitelistInput) return;
+    try {
+      await addWhitelist({ ip: whitelistInput, note: whitelistNote });
+      setWhitelistInput('');
+      setWhitelistNote('');
+      fetchWhitelist();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || T.generic_error);
+    }
+  };
+
+  const confirmWhitelistRemoval = async () => {
+    const entry = pendingWhitelistRemoval;
+    setPendingWhitelistRemoval(null);
+    if (!entry) return;
+    try {
+      await removeWhitelist(entry);
+      fetchWhitelist();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || T.generic_error);
+    }
+  };
 
   const handleManualBlock = async (e) => {
     e.preventDefault();
@@ -78,6 +124,39 @@ export function BlockedIPs() {
       <div>
         <h1 className="text-2xl font-bold text-slate-100">{T.blocked_title}</h1>
         <p className="text-xs text-slate-400 mt-1">{T.blocked_subtitle}</p>
+      </div>
+
+      <div className="glass-card p-5 space-y-4">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-200">{T.whitelist_title}</h3>
+          <p className="text-xs text-slate-500">{T.whitelist_subtitle}</p>
+        </div>
+        <form onSubmit={handleWhitelistAdd} className="flex flex-wrap gap-2">
+          <input
+            value={whitelistInput}
+            onChange={(event) => setWhitelistInput(event.target.value)}
+            placeholder={T.whitelist_placeholder}
+            className="flex-1 min-w-48 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono"
+          />
+          <input
+            value={whitelistNote}
+            onChange={(event) => setWhitelistNote(event.target.value)}
+            placeholder={T.whitelist_note}
+            className="flex-1 min-w-48 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs"
+          />
+          <button className="px-4 py-2 rounded-lg bg-blue-600 text-xs font-semibold">{T.whitelist_add}</button>
+        </form>
+        <div className="flex flex-wrap gap-2">
+          {whitelist.map((item) => (
+            <div key={item.ip} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs">
+              <span className="font-mono text-blue-400">{item.ip}</span>
+              {item.note && <span className="text-slate-500">{item.note}</span>}
+              <button onClick={() => setPendingWhitelistRemoval(item.ip)} className="text-red-400">
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -203,6 +282,16 @@ export function BlockedIPs() {
         onConfirm={confirmUnblock}
         onCancel={() => setPendingUnblockIp(null)}
         danger={false}
+      />
+
+      <ConfirmDialog
+        isOpen={!!pendingWhitelistRemoval}
+        title={T.whitelist_confirm_title}
+        body={t('whitelist_confirm_body', { ip: pendingWhitelistRemoval || '' })}
+        confirmLabel={T.whitelist_remove}
+        onConfirm={confirmWhitelistRemoval}
+        onCancel={() => setPendingWhitelistRemoval(null)}
+        danger={true}
       />
     </div>
   );

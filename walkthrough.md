@@ -1,220 +1,160 @@
-# SAGEDRAL-ML — Panduan Instalasi & Menjalankan di WSL
+# Walkthrough SAGEDRAL-ML
 
-> Tools NIDPS Machine Learning System — Smart Adaptive Guardian for Detection, Response and Adaptive Learning
+Panduan ini berlaku untuk rilis enterprise hasil implementasi `update.md`.
 
----
+## 1. Prasyarat
 
-## Status Implementasi Saat Ini
-
-| Komponen | Status |
-|---|---|
-| Config Manager (TOML) | ✅ Selesai |
-| Feature Extraction (FlowRecord) | ✅ Selesai |
-| Signature Engine (5 rules) | ✅ Selesai |
-| ML Engine (LightGBM + Anomaly) | ✅ Selesai |
-| Decision Engine (Hybrid Score) | ✅ Selesai |
-| IPS Module (nftables/iptables) | ✅ Selesai |
-| Packet Capture (Scapy) | ✅ Selesai |
-| Database (SQLite + SQLAlchemy) | ✅ Selesai |
-| FastAPI Backend + WebSocket | ✅ Selesai |
-| React Dashboard | ✅ Selesai |
-| CLI (`sagedral-ml`) | ✅ Selesai |
-| Systemd Service | ✅ Selesai |
-| Test Suite (25 tests) | ✅ 25/25 PASS |
-| Demo Seed Data | ✅ Selesai |
-
----
-
-## Demo di Windows (Langsung)
-
-Server sudah berjalan! Akses dashboard di:
-
-**http://localhost:8000**
-
-Untuk mengisi data demo:
-```powershell
-cd "c:\Users\HP\Hercio\SAGEDRAL-ML-Smart-Adaptive-Guardian-for-Detection-Response-and-Adaptive-Learning-ML"
-py -m scripts.seed_demo
-```
-
----
-
-## Cara Menjalankan di WSL (Full Linux Mode)
-
-### Prasyarat
-Buka WSL terminal (`wsl` di PowerShell atau Windows Terminal → Ubuntu).
-
-### Step 1 — Clone / Copy Project ke WSL
+- Linux kernel dengan `AF_PACKET`; Ubuntu/BackBox 20.04 direkomendasikan untuk
+  runtime Python 3.8.10 bawaan.
+- Python 3.8.10 atau lebih baru.
+- `libpcap`, `tcpdump`, `nftables`, `libgomp`, dan compiler saat instalasi.
+- Node.js 18 hanya diperlukan bila membangun ulang dashboard.
 
 ```bash
-# Opsi A: Akses langsung dari Windows filesystem
-cd /mnt/c/Users/HP/Hercio/SAGEDRAL-ML-Smart-Adaptive-Guardian-for-Detection-Response-and-Adaptive-Learning-ML
-
-# Opsi B: Copy ke home WSL (lebih cepat I/O)
-cp -r /mnt/c/Users/HP/Hercio/SAGEDRAL-ML-Smart-Adaptive-Guardian-for-Detection-Response-and-Adaptive-Learning-ML ~/sagedral-ml
-cd ~/sagedral-ml
+python3 --version
+sudo bash scripts/install.sh
+sudo systemctl status sagedral-ml
+sagedral-ml health
 ```
 
-### Step 2 — Install Dependencies System
+## 2. Konfigurasi awal
 
-```bash
-sudo apt-get update
-sudo apt-get install -y \
-    python3 python3-pip python3-venv \
-    libpcap-dev nftables iptables \
-    build-essential curl git
-```
-
-### Step 3 — Setup Python Environment
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -e ".[dev]"
-```
-
-### Step 4 — Jalankan Test Suite
-
-```bash
-python -m pytest tests/ -v
-# Expected: 25 passed
-```
-
-### Step 5 — Seed Data Demo
-
-```bash
-python -m scripts.seed_demo
-```
-
-### Step 6 — Jalankan Server API
-
-```bash
-# Mode development (tanpa root, tanpa packet capture)
-python -m uvicorn sagedral_ml.api.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-Akses dashboard di browser: **http://localhost:8000**
-
-### Step 7 — Jalankan Full System (Butuh Root untuk Capture + IPS)
-
-```bash
-# Harus root untuk Scapy dan nftables
-sudo -E .venv/bin/python -m sagedral_ml.main
-
-# Atau gunakan CLI:
-sudo sagedral-ml start --interface eth0
-```
-
----
-
-## API Endpoints yang Tersedia
-
-| Method | Endpoint | Deskripsi |
-|---|---|---|
-| GET | `/api/v1/status` | Status sistem & uptime |
-| GET | `/api/v1/alerts` | Daftar alert (dengan filter) |
-| GET | `/api/v1/blocked-ips` | IP yang diblokir |
-| POST | `/api/v1/blocked-ips` | Manual block IP |
-| DELETE | `/api/v1/blocked-ips/{ip}` | Unblock IP |
-| GET | `/api/v1/traffic/stats` | Statistik traffic |
-| GET | `/api/v1/config` | Lihat konfigurasi |
-| PUT | `/api/v1/config` | Update konfigurasi |
-| GET | `/api/v1/model/info` | Info model ML |
-| POST | `/api/v1/model/retrain` | Trigger retrain model |
-| GET | `/api/v1/rules` | Signature rules |
-| WS | `/ws/alerts` | WebSocket real-time alerts |
-| GET | `/docs` | Swagger UI / API Docs |
-
----
-
-## Konfigurasi System
-
-File konfigurasi utama: `config/sagedral-ml.toml`
+Edit `/etc/sagedral/config.toml`.
 
 ```toml
 [capture]
-interface = "eth0"        # Ganti sesuai interface jaringan
-promiscuous = true
+interface = "eth1"
+backend = "scapy"       # scapy | libpcap | af_packet
 bpf_filter = ""
-
-[detection]
-ml_threshold = 0.65
-signature_enabled = true
-anomaly_enabled = true
+promiscuous = true
 
 [ips]
-auto_block = true
-auto_unblock_after = 3600
-whitelist = ["127.0.0.1", "10.0.0.0/8"]
+enabled = true
+preferred_backend = "nftables"
+whitelist = ["127.0.0.1", "::1", "10.20.0.0/16"]
 
 [api]
-host = "0.0.0.0"
+host = "127.0.0.1"     # gunakan reverse proxy TLS untuk akses eksternal
 port = 8000
-
-[database]
-path = "/var/lib/sagedral-ml/sagedral.db"
 ```
 
----
-
-## Training Model ML
+Validasi dan restart:
 
 ```bash
-# Generate training data dan train model
-python -m sagedral_ml.training.train_model \
-    --data data/training/ \
-    --output models/
-
-# Atau gunakan CLI
-sagedral-ml train --data data/training/
-```
-
----
-
-## Systemd Service (Production di Linux)
-
-```bash
-# Install sebagai service
-sudo scripts/install.sh
-
-# Start / Stop / Status
-sudo systemctl start sagedral-ml
-sudo systemctl stop sagedral-ml
-sudo systemctl status sagedral-ml
-
-# Lihat logs
+sudo -u sagedral sagedral-ml config validate
+sudo systemctl restart sagedral-ml
 sudo journalctl -u sagedral-ml -f
 ```
 
----
+Untuk throughput tinggi, `af_packet` menggunakan TPACKET_V2
+`PACKET_RX_RING` mmap dan memasang BPF melalui `tcpdump -ddd`. Pantau
+`kernel_drop_rate_pct` pada endpoint capture atau Prometheus.
 
-## Troubleshooting
+## 3. Login pertama
 
-**Port 8000 sudah dipakai:**
 ```bash
-# Ganti port
-python -m uvicorn sagedral_ml.api.main:app --port 8080
+sudo cat /var/lib/sagedral-ml/.sagedral-admin-secret
+sagedral-ml login
 ```
 
-**Error `No module named 'sagedral_ml'`:**
-```bash
-pip install -e .
-# atau
-export PYTHONPATH=$(pwd)
+Dashboard dilindungi JWT. Admin dapat membuka menu Jestaun Uzuáriu untuk
+membuat `viewer`, `analyst`, atau `admin`. Viewer read-only; analyst dapat
+menanggapi alert dan block/unblock; admin mengelola konfigurasi, whitelist,
+rules, audit, dan user.
+
+## 4. Endpoint utama
+
+| Method | Path | Akses |
+|---|---|---|
+| POST | `/api/v1/auth/login` | Publik, rate limited |
+| GET | `/api/v1/status` | Publik minimal |
+| GET | `/api/v1/status/details` | Login |
+| GET | `/api/v1/capture/stats` | Login |
+| GET | `/api/v1/alerts` | Login |
+| GET | `/api/v1/alerts/export.csv` | Login |
+| POST | `/api/v1/alerts/{id}/feedback` | Analyst/Admin |
+| POST | `/api/v1/alerts/{id}/close` | Analyst/Admin |
+| POST | `/api/v1/blocked-ips/bulk` | Analyst/Admin |
+| POST | `/api/v1/blocked-ips/networks` | Admin |
+| GET/POST/DELETE | `/api/v1/whitelist` | Login/Admin/Admin |
+| GET/POST/PUT/DELETE | `/api/v1/rules` | Login/Admin/Admin/Admin |
+| GET/POST/PUT/DELETE | `/api/v1/users` | Admin |
+| GET | `/api/v1/audit-logs` | Admin |
+| GET | `/api/v1/model/drift` | Login |
+| POST | `/api/v1/model/reload` | Admin |
+| POST | `/api/v1/feedback/retrain` | Admin |
+| GET | `/healthz`, `/readyz`, `/metrics` | Monitoring |
+| WS | `/ws/alerts?token=<JWT>` | JWT aktif |
+
+Swagger tersedia di `/docs`.
+
+## 5. Custom signature DSL
+
+Contoh request rule:
+
+```json
+{
+  "rule_id": "CUSTOM-SSH-01",
+  "name": "SSH burst",
+  "description": "Banyak koneksi SSH singkat",
+  "severity": "HIGH",
+  "condition_expr": "flow.get('dst_port', 0) == 22 and total_fwd_packets > 30",
+  "attack_type": "BruteForce"
+}
 ```
 
-**Scapy permission error:**
-```bash
-sudo setcap cap_net_raw=eip $(which python3)
-# atau jalankan dengan sudo
+DSL mendukung operasi numerik, boolean, perbandingan, nama fitur, dan
+`flow.get()`. Import, dunder, comprehension, lambda, assignment, dan function
+call lain ditolak.
+
+## 6. SIEM, notifikasi, GeoIP
+
+```toml
+[siem]
+enabled = true
+minimum_severity = "MEDIUM"
+syslog_host = "10.20.0.30"
+syslog_port = 514
+syslog_protocol = "tcp"
+webhook_urls = ["https://hooks.slack.com/services/..."]
+
+[notifications]
+enabled = true
+minimum_severity = "HIGH"
+telegram_bot_token = "..."
+telegram_chat_id = "..."
+smtp_host = "smtp.internal"
+smtp_port = 587
+smtp_starttls = true
+smtp_username = "sagedral"
+smtp_password = "..."
+email_sender = "sagedral@example.internal"
+email_recipients = ["soc@example.internal"]
 ```
 
-**nftables tidak ditemukan (WSL):**
+Pengiriman SIEM dan notifikasi dilakukan di worker terbatas agar hot loop
+deteksi tidak menunggu jaringan eksternal.
+
+## 7. Monitoring dan performance
+
 ```bash
-# WSL memiliki kernel terbatas, gunakan mode API-only:
-SAGEDRAL_IPS_BACKEND=log python -m sagedral_ml.main
+curl -f http://127.0.0.1:8000/healthz
+curl -f http://127.0.0.1:8000/readyz
+curl http://127.0.0.1:8000/metrics
+python scripts/benchmark.py --iterations 10000 --minimum-fps 1000
+python scripts/pcap_regression.py --self-test
 ```
 
-> [!NOTE]
-> Dashboard dan API penuh berjalan tanpa root. Root hanya diperlukan untuk packet capture (Scapy) dan IPS action (nftables/iptables).
+Konfigurasi Prometheus dan alert tersedia di `deploy/`. Angka 1 Gbps bukan
+jaminan lintas hardware; lakukan soak test pada NIC, kernel, jumlah core,
+ukuran flow, dan traffic mix target sebelum inline production.
+
+## 8. TLS dan HA
+
+Template Nginx TLS/CSP: `deploy/nginx-sagedral.conf`.
+
+Template Keepalived: `deploy/keepalived-sagedral.conf`. HA sync memakai shared
+secret dan endpoint internal blocklist. Gunakan PostgreSQL shared/replicated,
+firewall antar-node terbatas, dan secret minimal 24 karakter.
+
+Prosedur lengkap terdapat di [docs/RUNBOOK.md](docs/RUNBOOK.md).

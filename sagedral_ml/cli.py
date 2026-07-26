@@ -15,10 +15,32 @@ from pathlib import Path
 from typing import List, Tuple
 from sagedral_ml import __version__
 from sagedral_ml.config import get_config, load_config, generate_default_toml_string, DEFAULT_CONFIG_PATH
-from sagedral_ml.ips.response import validate_ip
+from sagedral_ml.ips.response import validate_ip, validate_ip_or_network
 
 
-API_BASE = "http://localhost:8000/api/v1"
+API_BASE = os.environ.get(
+    "SAGEDRAL_API_BASE", "http://localhost:8000/api/v1"
+).rstrip("/")
+TOKEN_PATH = Path.home() / ".config" / "sagedral" / "api-token"
+
+
+def _api_headers() -> dict:
+    token = os.environ.get("SAGEDRAL_API_TOKEN", "").strip()
+    if not token:
+        try:
+            token = TOKEN_PATH.read_text(encoding="utf-8").strip()
+        except OSError:
+            token = ""
+    return {"Authorization": "Bearer %s" % token} if token else {}
+
+
+def _require_api_token() -> dict:
+    headers = _api_headers()
+    if not headers:
+        _cli_error(
+            "Authentication token not found. Run 'sagedral-ml login' or set SAGEDRAL_API_TOKEN."
+        )
+    return headers
 
 
 def _cli_error(msg: str, exit_code: int = 1) -> None:
@@ -61,6 +83,81 @@ def start(daemon, no_capture):
         _cli_error(f"Failed to start service: {e}")
 
 
+@main.command("login")
+@click.option("--username", prompt="Naran uzuariu", help="SAGEDRAL username")
+@click.option(
+    "--password",
+    prompt=True,
+    hide_input=True,
+    confirmation_prompt=False,
+    help="SAGEDRAL password",
+)
+def cli_login(username, password):
+    """Authenticate CLI and store a mode-0600 API token."""
+    try:
+        response = requests.post(
+            f"{API_BASE}/auth/login",
+            data={"username": username, "password": password},
+            timeout=10,
+        )
+        if response.status_code != 200:
+            _cli_error(
+                "Login failed: %s"
+                % response.json().get("detail", response.text)
+            )
+        token = response.json()["access_token"]
+        TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(
+            str(TOKEN_PATH),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o600,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(token)
+        try:
+            os.chmod(str(TOKEN_PATH), 0o600)
+        except OSError:
+            pass
+        _cli_ok("Login successful. Token saved to %s" % TOKEN_PATH)
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        _cli_error("Login request failed: %s" % exc)
+
+
+@main.command("logout")
+def cli_logout():
+    """Remove the locally stored API token."""
+    try:
+        requests.post(
+            f"{API_BASE}/auth/logout",
+            headers=_api_headers(),
+            timeout=5,
+        )
+    except Exception:
+        pass
+    try:
+        TOKEN_PATH.unlink()
+    except FileNotFoundError:
+        pass
+    _cli_ok("Local API session removed.")
+
+
+@main.command()
+def health():
+    """Check liveness/readiness with monitoring-friendly exit status."""
+    root = API_BASE.rsplit("/api/v1", 1)[0]
+    try:
+        response = requests.get(root + "/healthz", timeout=5)
+        click.echo(json.dumps(response.json(), indent=2))
+        if response.status_code != 200:
+            raise click.exceptions.Exit(1)
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        _cli_error("Health check failed: %s" % exc)
+
+
 @main.command()
 def stop():
     """Stop running SAGEDRAL-ML service."""
@@ -77,7 +174,11 @@ def status():
     """Check running status of SAGEDRAL-ML service."""
     try:
         try:
-            r = requests.get(f"{API_BASE}/status", timeout=2)
+            r = requests.get(
+                f"{API_BASE}/status/details",
+                headers=_api_headers(),
+                timeout=2,
+            )
             if r.status_code == 200:
                 data = r.json()
                 click.secho("SAGEDRAL-ML Service: RUNNING", fg="green", bold=True)
@@ -116,7 +217,7 @@ def config_show():
     """Show current active configuration."""
     try:
         cfg = get_config()
-        click.echo(json.dumps(cfg.to_dict(), indent=2))
+        click.echo(json.dumps(cfg.to_safe_dict(), indent=2))
     except Exception as e:
         _cli_error(f"Failed to load config: {e}")
 
@@ -145,6 +246,43 @@ def config_validate():
             click.secho("Configuration is VALID.", fg="green", bold=True)
     except Exception as e:
         _cli_error(f"Validation error: {e}")
+
+
+# ================= DATABASE / BACKUP COMMANDS =================
+
+
+@main.group()
+def database():
+    """Database schema migration commands."""
+    pass
+
+
+@database.command("migrate")
+def database_migrate():
+    """Apply all bundled Alembic migrations."""
+    try:
+        from sagedral_ml.database.connection import run_alembic_migrations
+
+        if not run_alembic_migrations():
+            _cli_error("Database migration did not complete; inspect the log.")
+        _cli_ok("Database migration completed.")
+    except Exception as exc:
+        _cli_error("Database migration failed: %s" % exc)
+
+
+@database.command("revision")
+@click.option("--message", required=True, help="Short migration description")
+def database_revision(message):
+    """Create an autogenerated schema revision for developers."""
+    try:
+        from alembic import command
+        from alembic.config import Config as AlembicConfig
+
+        root = Path(__file__).resolve().parents[1]
+        alembic_config = AlembicConfig(str(root / "alembic.ini"))
+        command.revision(alembic_config, message=message, autogenerate=True)
+    except Exception as exc:
+        _cli_error("Could not create migration revision: %s" % exc)
 
 
 # ================= BACKUP COMMANDS =================
@@ -180,7 +318,17 @@ def backup_create(output_path):
         for file_path in candidates:
             sources.append((file_path, os.path.basename(file_path)))
 
-        if os.path.exists(db_path):
+        from sagedral_ml.database.backup import DatabaseBackupManager
+
+        managed_db_backup = DatabaseBackupManager(cfg).run_full_backup()
+        if managed_db_backup:
+            sources.append(
+                (
+                    managed_db_backup,
+                    "database/%s" % os.path.basename(managed_db_backup),
+                )
+            )
+        elif os.path.exists(db_path):
             sources.append((db_path, f"database/{os.path.basename(db_path)}"))
 
         if os.path.isdir(model_dir):
@@ -222,12 +370,44 @@ def backup_create(output_path):
             count += 1
 
         archive_size = os.path.getsize(output_path)
+        try:
+            os.chmod(output_path, 0o600)
+        except OSError:
+            pass
         _cli_ok(f"Backup complete: {output_path} ({count} files, {archive_size} bytes)")
         return
     except click.exceptions.Exit:
         raise
     except Exception as e:
         _cli_error(f"Backup creation failed: {e}")
+
+
+@backup.command("list")
+def backup_list():
+    """List available managed database backups."""
+    try:
+        from sagedral_ml.database.backup import DatabaseBackupManager
+
+        manager = DatabaseBackupManager(get_config())
+        backups = manager._list_backups()
+        if not backups:
+            click.echo("No managed backups found.")
+            return
+        for path in backups:
+            stat_info = path.stat()
+            click.echo(
+                "%s  %10d bytes  %s"
+                % (
+                    time.strftime(
+                        "%Y-%m-%d %H:%M:%S",
+                        time.localtime(stat_info.st_mtime),
+                    ),
+                    stat_info.st_size,
+                    path,
+                )
+            )
+    except Exception as exc:
+        _cli_error("Backup list failed: %s" % exc)
 
 
 @backup.command("restore")
@@ -269,7 +449,25 @@ def backup_restore(source_path, confirm):
 
         try:
             with tarfile.open(source_path, "r:gz") as tar:
-                tar.extractall(path=extract_dir)
+                extract_root = os.path.realpath(extract_dir)
+                safe_members = []
+                for member in tar.getmembers():
+                    target = os.path.realpath(
+                        os.path.join(extract_root, member.name)
+                    )
+                    if not (
+                        target == extract_root
+                        or target.startswith(extract_root + os.sep)
+                    ):
+                        raise ValueError(
+                            "Unsafe archive path: %s" % member.name
+                        )
+                    if member.issym() or member.islnk():
+                        raise ValueError(
+                            "Archive links are not allowed: %s" % member.name
+                        )
+                    safe_members.append(member)
+                tar.extractall(path=extract_dir, members=safe_members)
         except Exception as e:
             shutil.rmtree(extract_dir, ignore_errors=True)
             _cli_error(f"Failed to extract archive: {e}")
@@ -349,7 +547,7 @@ def block(ip, duration, reason):
     try:
         r = requests.post(f"{API_BASE}/blocked-ips", json={
             "ip": clean_ip, "reason": reason, "duration_seconds": duration
-        }, timeout=3)
+        }, headers=_require_api_token(), timeout=3)
         if r.status_code == 200:
             _cli_ok(f"Successfully blocked IP {clean_ip}")
         else:
@@ -369,13 +567,83 @@ def unblock(ip):
         return
 
     try:
-        r = requests.delete(f"{API_BASE}/blocked-ips/{clean_ip}", timeout=3)
+        r = requests.delete(
+            f"{API_BASE}/blocked-ips/{clean_ip}",
+            headers=_require_api_token(),
+            timeout=3,
+        )
         if r.status_code == 200:
             _cli_ok(f"Successfully unblocked IP {clean_ip}")
         else:
             _cli_error(f"{r.json().get('detail', r.text)}")
     except Exception as e:
         _cli_error(f"API request failed: {e}")
+
+
+@main.group()
+def whitelist():
+    """Manage protected single IP/CIDR whitelist entries."""
+    pass
+
+
+@whitelist.command("list")
+def whitelist_list():
+    try:
+        response = requests.get(
+            f"{API_BASE}/blocked-ips/whitelist",
+            headers=_require_api_token(),
+            timeout=5,
+        )
+        if response.status_code != 200:
+            _cli_error(response.text)
+        for item in response.json().get("data", []):
+            click.echo(
+                "%-45s %s" % (item.get("ip", ""), item.get("note", ""))
+            )
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        _cli_error("Whitelist request failed: %s" % exc)
+
+
+@whitelist.command("add")
+@click.argument("entry")
+@click.option("--note", default="", help="Administrative note")
+def whitelist_add(entry, note):
+    try:
+        clean_entry = validate_ip_or_network(entry)
+        response = requests.post(
+            f"{API_BASE}/blocked-ips/whitelist",
+            json={"ip": clean_entry, "note": note},
+            headers=_require_api_token(),
+            timeout=5,
+        )
+        if response.status_code != 200:
+            _cli_error(response.text)
+        _cli_ok("Whitelist entry added: %s" % clean_entry)
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        _cli_error("Whitelist add failed: %s" % exc)
+
+
+@whitelist.command("remove")
+@click.argument("entry")
+def whitelist_remove(entry):
+    try:
+        clean_entry = validate_ip_or_network(entry)
+        response = requests.delete(
+            f"{API_BASE}/blocked-ips/whitelist/{clean_entry}",
+            headers=_require_api_token(),
+            timeout=5,
+        )
+        if response.status_code != 200:
+            _cli_error(response.text)
+        _cli_ok("Whitelist entry removed: %s" % clean_entry)
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        _cli_error("Whitelist remove failed: %s" % exc)
 
 
 # ================= ALERTS COMMANDS =================
@@ -391,7 +659,11 @@ def alerts():
 def alerts_list(limit):
     """List recent security alerts."""
     try:
-        r = requests.get(f"{API_BASE}/alerts?limit={limit}", timeout=3)
+        r = requests.get(
+            f"{API_BASE}/alerts?limit={limit}",
+            headers=_require_api_token(),
+            timeout=3,
+        )
         if r.status_code == 200:
             data = r.json().get("data", [])
             if not data:
@@ -432,7 +704,13 @@ def model_init(force, model_dir):
         classifier_threshold = float(cfg.get("ml", "classifier_threshold", 0.6))
 
         if force:
-            for fname in ("anomaly_detector.pkl", "attack_classifier.pkl", "feature_names.json"):
+            for fname in (
+                "anomaly_detector.pkl",
+                "attack_classifier.pkl",
+                "feature_names.json",
+                "model_profile.json",
+                "model_metadata.json",
+            ):
                 fp = os.path.join(resolved_dir, fname)
                 if os.path.exists(fp):
                     try:
@@ -492,7 +770,11 @@ def model_info():
             offline_info = {"error": str(e), "local": True}
 
         try:
-            r = requests.get(f"{API_BASE}/model/info", timeout=2)
+            r = requests.get(
+                f"{API_BASE}/model/info",
+                headers=_api_headers(),
+                timeout=2,
+            )
             if r.status_code == 200:
                 online = r.json()
                 online["local"] = False
@@ -513,12 +795,17 @@ def model_info():
 
 @main.command()
 @click.option("--dataset", "dataset_path", required=True, type=click.Path(exists=True, dir_okay=False), help="Path to input CSV dataset (CICIDS-style)")
-@click.option("--save-dir", required=True, type=click.Path(file_okay=False), help="Directory to write trained model artifacts")
+@click.option("--save-dir", default=None, type=click.Path(file_okay=False), help="Directory to write trained model artifacts (default: ml.model_dir)")
+@click.option("--train-test-split", default=0.2, type=click.FloatRange(0.05, 0.5), help="Validation fraction (0.05-0.5)")
 @click.option("--hot-reload", is_flag=True, default=False, help="After training, notify running API to reload models via restart hint")
-def train(dataset_path, save_dir, hot_reload):
+def train(dataset_path, save_dir, train_test_split, hot_reload):
     """Train LightGBM anomaly detector & attack classifier from dataset CSV."""
     try:
         dataset_path = os.path.abspath(dataset_path)
+        if not save_dir:
+            save_dir = get_config().get(
+                "ml", "model_dir", "/var/lib/sagedral-ml/models"
+            )
         save_dir = os.path.abspath(save_dir)
         os.makedirs(save_dir, exist_ok=True)
 
@@ -533,7 +820,11 @@ def train(dataset_path, save_dir, hot_reload):
             return
 
         try:
-            train_models(dataset_path=dataset_path, output_dir=save_dir)
+            train_models(
+                dataset_path=dataset_path,
+                output_dir=save_dir,
+                validation_split=train_test_split,
+            )
         except Exception as e:
             _cli_error(f"Training pipeline failed: {e}")
             return
@@ -548,11 +839,15 @@ def train(dataset_path, save_dir, hot_reload):
         if hot_reload:
             click.echo("Hot reload requested: attempting to notify service (service restart recommended).")
             try:
-                r = requests.get(f"{API_BASE}/status", timeout=2)
-                if r.status_code == 200:
-                    _cli_ok("Service is running. For hot reload, re-init model via API or restart service.")
+                r = requests.post(
+                    f"{API_BASE}/model/reload",
+                    headers=_require_api_token(),
+                    timeout=10,
+                )
+                if r.status_code == 200 and r.json().get("success"):
+                    _cli_ok("Running service reloaded the trained model.")
                 else:
-                    _cli_warn(f"Service status check returned {r.status_code}; cannot trigger hot reload.")
+                    _cli_warn(f"Model reload returned {r.status_code}: {r.text}")
             except Exception as e:
                 _cli_warn(f"Service unreachable for hot reload notification: {e}")
             click.echo("  Tip: set ml.model_dir in config to the trained save-dir, then restart or reload.")
