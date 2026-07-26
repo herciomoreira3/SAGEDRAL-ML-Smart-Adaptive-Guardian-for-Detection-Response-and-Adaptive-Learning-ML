@@ -172,26 +172,77 @@ def stop():
 @main.command()
 def status():
     """Check running status of SAGEDRAL-ML service."""
+    headers = _api_headers()
+    details_auth_rejected = False
     try:
-        try:
-            r = requests.get(
+        if headers:
+            details_response = requests.get(
                 f"{API_BASE}/status/details",
-                headers=_api_headers(),
-                timeout=2,
+                headers=headers,
+                timeout=5,
             )
-            if r.status_code == 200:
-                data = r.json()
+            if details_response.status_code == 200:
+                data = details_response.json()
                 click.secho("SAGEDRAL-ML Service: RUNNING", fg="green", bold=True)
                 click.echo(f"  Interface:         {data.get('interface')}")
                 click.echo(f"  Uptime:            {data.get('uptime_seconds')}s")
-                click.echo(f"  Active Blocked IPs:{data.get('blocked_ips_count')}")
+                click.echo(f"  Active Blocked IPs: {data.get('blocked_ips_count')}")
                 click.echo(f"  ML Model Loaded:   {data.get('ml_model_loaded')}")
                 return
-        except Exception:
-            pass
-        click.secho("SAGEDRAL-ML Service: STOPPED / UNREACHABLE", fg="red", bold=True)
-    except Exception as e:
-        _cli_error(f"Error checking status: {e}")
+            details_auth_rejected = details_response.status_code in (401, 403)
+            if not details_auth_rejected:
+                click.secho(
+                    "Detailed status unavailable (HTTP %d); checking public status."
+                    % details_response.status_code,
+                    fg="yellow",
+                )
+
+        # The public endpoint intentionally needs no JWT. This distinguishes an
+        # expired/missing CLI login from a service that is actually stopped.
+        public_response = requests.get(f"{API_BASE}/status", timeout=5)
+        if public_response.status_code == 200:
+            data = public_response.json()
+            click.secho(
+                "SAGEDRAL-ML Service: RUNNING",
+                fg="green",
+                bold=True,
+            )
+            click.echo(f"  Version:           {data.get('version', 'unknown')}")
+            click.echo(f"  Uptime:            {data.get('uptime_seconds', 0)}s")
+            if not headers:
+                click.echo(
+                    "  Details:           login required; run 'sagedral-ml login'"
+                )
+            elif details_auth_rejected:
+                click.echo(
+                    "  Details:           token rejected/expired; run 'sagedral-ml login'"
+                )
+            else:
+                click.echo(
+                    "  Details:           detailed endpoint temporarily unavailable"
+                )
+            return
+
+        click.secho(
+            "SAGEDRAL-ML Service: UNHEALTHY (HTTP %d)"
+            % public_response.status_code,
+            fg="red",
+            bold=True,
+        )
+        raise click.exceptions.Exit(1)
+    except click.exceptions.Exit:
+        raise
+    except requests.RequestException as exc:
+        click.secho(
+            "SAGEDRAL-ML Service: STOPPED / UNREACHABLE",
+            fg="red",
+            bold=True,
+        )
+        click.echo("  API: %s" % API_BASE)
+        click.echo("  Error: %s" % exc)
+        raise click.exceptions.Exit(1)
+    except (AttributeError, TypeError, ValueError, KeyError) as exc:
+        _cli_error("Invalid status response from API: %s" % exc)
 
 
 @main.command()

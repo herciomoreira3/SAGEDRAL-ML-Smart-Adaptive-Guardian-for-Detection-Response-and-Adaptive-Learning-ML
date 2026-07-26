@@ -56,6 +56,20 @@ Jika masih gagal, `namei -l /etc/sagedral/config.toml` dan
 dapat diakses. Jangan mengubah service kembali menjadi `root`; perbaiki
 ownership path yang disebut journal.
 
+Jika `sagedral-ml health` dan `systemctl status` sehat tetapi CLI
+`sagedral-ml status` meminta detail login, service tetap berjalan. Endpoint
+detail memerlukan JWT, sedangkan CLI versi terbaru otomatis memakai status
+publik ketika token belum ada/kedaluwarsa. Perbarui paket lalu coba kembali:
+
+```bash
+cd ~/sagedral-ml
+sudo python3 -m pip install --no-deps .
+sagedral-ml status
+```
+
+Jalankan `sagedral-ml login` bila memerlukan interface, jumlah block, dan
+status model pada output detail.
+
 ## Respons insiden
 
 1. Jangan menghapus alert sebelum export CSV dan snapshot audit.

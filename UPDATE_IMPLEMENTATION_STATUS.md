@@ -29,7 +29,7 @@ F2-01 sampai F2-18 dan F2-20 tersedia:
 - Replay PCAP generic plus gate precision/recall deterministik di CI.
 
 F2-19 (target coverage 80%) belum memenuhi angka acceptance: suite meningkat
-dari 38 menjadi 55 test, seluruhnya lulus, tetapi coverage total aktual adalah
+dari 38 menjadi 59 test, seluruhnya lulus, tetapi coverage total aktual adalah
 41%. Laporan ini sengaja tidak menyembunyikan modul CLI/orchestrator/adapter
 Linux yang belum tercakup penuh.
 
@@ -58,7 +58,7 @@ belum diterapkan.
 
 - Parse seluruh Python dengan grammar Python 3.8: lulus.
 - `compileall`: lulus.
-- `pytest`: 55 lulus.
+- `pytest`: 59 lulus.
 - Replay PCAP fixture: precision 1.00, recall 1.00.
 - Benchmark lokal: sekitar 16k flow/detik pada fallback test.
 - Dashboard Vite production build: lulus pada audit sebelumnya dan dibangun
