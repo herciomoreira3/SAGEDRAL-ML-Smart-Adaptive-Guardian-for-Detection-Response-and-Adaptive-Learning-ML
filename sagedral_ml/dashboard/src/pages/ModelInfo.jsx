@@ -3,6 +3,12 @@ import { getModelInfo, getModelDrift } from '../api/client';
 import { useTranslation } from '../i18n/hook';
 import { BrainCircuit, CheckCircle2, Cpu } from 'lucide-react';
 
+const formatPercent = (value, unavailable = '—') => {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
+    ? `${(value * 100).toFixed(1)}%`
+    : unavailable;
+};
+
 export function ModelInfo() {
   const { T } = useTranslation();
   const [modelInfo, setModelInfo] = useState(null);
@@ -30,6 +36,12 @@ export function ModelInfo() {
         </div>
       )}
 
+      {(modelInfo.anomaly_model?.note || modelInfo.classifier_model?.note) && (
+        <div className="p-3 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-300 text-xs">
+          {modelInfo.anomaly_model?.note || modelInfo.classifier_model?.note}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="glass-card p-5 space-y-4">
           <div className="flex items-center gap-3">
@@ -53,11 +65,11 @@ export function ModelInfo() {
             </div>
             <div className="flex justify-between py-1 border-b border-slate-800/40">
               <span className="text-slate-400">{T.model_val_accuracy}</span>
-              <span className="font-mono text-emerald-400 font-bold">{(modelInfo.anomaly_model?.accuracy * 100).toFixed(1)}%</span>
+              <span className="font-mono text-emerald-400 font-bold">{formatPercent(modelInfo.anomaly_model?.accuracy, T.model_metric_unavailable)}</span>
             </div>
             <div className="flex justify-between py-1">
               <span className="text-slate-400">{T.model_f1_score}</span>
-              <span className="font-mono text-emerald-400 font-bold">{(modelInfo.anomaly_model?.f1_score * 100).toFixed(1)}%</span>
+              <span className="font-mono text-emerald-400 font-bold">{formatPercent(modelInfo.anomaly_model?.f1_score, T.model_metric_unavailable)}</span>
             </div>
           </div>
         </div>
@@ -80,7 +92,7 @@ export function ModelInfo() {
             </div>
             <div className="flex justify-between py-1 border-b border-slate-800/40">
               <span className="text-slate-400">{T.model_multiclass_acc}</span>
-              <span className="font-mono text-emerald-400 font-bold">{(modelInfo.classifier_model?.accuracy * 100).toFixed(1)}%</span>
+              <span className="font-mono text-emerald-400 font-bold">{formatPercent(modelInfo.classifier_model?.accuracy, T.model_metric_unavailable)}</span>
             </div>
             <div className="py-1">
               <span className="text-slate-400 block mb-1.5">{T.model_classes}</span>

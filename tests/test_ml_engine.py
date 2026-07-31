@@ -16,6 +16,16 @@ def test_ml_engine_initializes_without_trained_models(tmp_path):
     assert engine.version is not None
 
 
+def test_fallback_metadata_is_available_in_memory(tmp_path):
+    engine = MLEngine(model_dir=str(tmp_path), enabled=True)
+    assert engine.model_metadata.get("version") == engine.version
+    if engine.version.endswith("-fallback"):
+        assert 0.0 <= engine.model_metadata["anomaly_accuracy"] <= 1.0
+        assert 0.0 <= engine.model_metadata["anomaly_f1"] <= 1.0
+        assert 0.0 <= engine.model_metadata["classifier_accuracy"] <= 1.0
+        assert "synthetic" in engine.model_metadata["validation_note"]
+
+
 def test_ml_engine_predict_returns_scores(tmp_path):
     engine = MLEngine(
         model_dir=str(tmp_path),

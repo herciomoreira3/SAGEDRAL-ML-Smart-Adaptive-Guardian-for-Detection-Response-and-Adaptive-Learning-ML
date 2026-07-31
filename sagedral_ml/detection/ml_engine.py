@@ -249,6 +249,12 @@ class MLEngine:
             self.feature_names = FEATURE_NAMES
             self.model_loaded = True
             self.version = "1.0.0-rulebased"
+            self.model_metadata = {
+                "version": self.version,
+                "source": "rulebased-fallback",
+                "generated_at": time.time(),
+                "validation_note": "Rule-based fallback; validation metrics unavailable.",
+            }
             logger.warning(
                 "Loaded RULE-BASED fallback ML models (LightGBM/scikit-learn unavailable or no .pkl files). "
                 "Install dependencies and/or train with a real dataset for better detection accuracy. "
@@ -303,7 +309,10 @@ class MLEngine:
                         random_state=42,
                         verbosity=-1,
                     )
-                    anomaly_model.fit(X_bin, y_bin)
+                    # Keep a deterministic held-out slice for transparent synthetic metrics.
+                    bin_train = np.concatenate((np.arange(0, 320), np.arange(400, 464)))
+                    bin_valid = np.concatenate((np.arange(320, 400), np.arange(464, 480)))
+                    anomaly_model.fit(X_bin[bin_train], y_bin[bin_train])
 
                     classifier_model = LGBMClassifier(
                         n_estimators=50,
@@ -312,13 +321,38 @@ class MLEngine:
                         random_state=42,
                         verbosity=-1,
                     )
-                    classifier_model.fit(X_multi, y_multi)
+                    # Split each fixed class block independently so validation sees every class.
+                    class_train, class_valid = [], []
+                    for start in range(0, len(X_multi), n_per_class):
+                        split = start + int(n_per_class * 0.8)
+                        class_train.extend(range(start, split))
+                        class_valid.extend(range(split, start + n_per_class))
+                    classifier_model.fit(X_multi[class_train], y_multi[class_train])
                 except Exception as lgbm_err:
                     logger.warning(
                         f"LightGBM fallback training skipped ({lgbm_err}). Falling back to rule-based models."
                     )
                     return self._create_rulebased_fallback()
 
+                # Compute deterministic held-out metrics (synthetic data only).
+                bin_pred = anomaly_model.predict(X_bin[bin_valid])
+                anomaly_accuracy = float(np.mean(bin_pred == y_bin[bin_valid]))
+                anomaly_f1 = float(2 * np.sum((bin_pred == 1) & (y_bin[bin_valid] == 1)) /
+                                   max(2 * np.sum((bin_pred == 1) & (y_bin[bin_valid] == 1)) +
+                                       np.sum((bin_pred == 1) & (y_bin[bin_valid] == 0)) +
+                                       np.sum((bin_pred == 0) & (y_bin[bin_valid] == 1)), 1))
+                multi_valid = np.asarray(class_valid, dtype=int)
+                classifier_accuracy = float(np.mean(classifier_model.predict(X_multi[multi_valid]) == y_multi[multi_valid]))
+                metadata = {
+                    "version": "1.0.0-fallback",
+                    "source": "synthetic-fallback",
+                    "generated_at": time.time(),
+                    "anomaly_accuracy": anomaly_accuracy,
+                    "anomaly_f1": anomaly_f1,
+                    "classifier_accuracy": classifier_accuracy,
+                    "validation_note": "Metrics are deterministic held-out synthetic validation only; train on a labeled production dataset before relying on accuracy.",
+                }
+                self.model_metadata = metadata
                 os.makedirs(self.model_dir, exist_ok=True)
                 anomaly_path = os.path.join(self.model_dir, "anomaly_detector.pkl")
                 classifier_path = os.path.join(self.model_dir, "attack_classifier.pkl")
@@ -337,11 +371,7 @@ class MLEngine:
                         json.dump(FEATURE_NAMES, f, indent=2)
                     with open(metadata_path, "w") as f:
                         json.dump(
-                            {
-                                "version": "1.0.0-fallback",
-                                "source": "synthetic-fallback",
-                                "generated_at": time.time(),
-                            },
+                            metadata,
                             f,
                             indent=2,
                         )

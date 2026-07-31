@@ -2,6 +2,8 @@
 API Router for Machine Learning Model metadata endpoints.
 """
 
+import math
+
 from fastapi import APIRouter, Depends
 from sagedral_ml.config import get_config
 
@@ -14,6 +16,18 @@ router = APIRouter(prefix="/api/v1/model", tags=["ML Model"])
 
 def _get_ml_engine():
     return global_container.ml_engine
+
+
+def _metric(metadata, key):
+    """Return only finite metrics in the normalized [0, 1] range."""
+    value = metadata.get(key) if isinstance(metadata, dict) else None
+    if isinstance(value, bool):
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and 0.0 <= value <= 1.0 else None
 
 
 @router.get("/info", dependencies=[Depends(get_current_user)])
@@ -44,8 +58,8 @@ async def get_model_info(_user=Depends(get_current_user)):
             "version": model_version,
             "type": "LightGBM Binary Anomaly Classifier",
             "n_features": 28,
-            "accuracy": metadata.get("anomaly_accuracy") if not is_fallback else None,
-            "f1_score": metadata.get("anomaly_f1") if not is_fallback else None,
+            "accuracy": _metric(metadata, "anomaly_accuracy"),
+            "f1_score": _metric(metadata, "anomaly_f1"),
             "note": None if not is_fallback else "Fallback model active. Train with a labeled production dataset before relying on ML accuracy.",
         },
         "classifier_model": {
@@ -62,7 +76,7 @@ async def get_model_info(_user=Depends(get_current_user)):
                 "Infiltration",
                 "Exfiltration",
             ],
-            "accuracy": metadata.get("classifier_accuracy") if not is_fallback else None,
+            "accuracy": _metric(metadata, "classifier_accuracy"),
             "note": None if not is_fallback else "Fallback model active. Train with a labeled production dataset before relying on ML accuracy.",
         },
     }

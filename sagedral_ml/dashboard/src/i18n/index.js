@@ -150,6 +150,7 @@ const TET = {
   model_multiclass_acc: 'Prezizaun Multiklase',
   model_classes: 'Klase Atake ne’ebé Suporta:',
   model_drift_warning: 'Modelu ML muda ona (PSI {psi}). Rekomenda treinu fali.',
+  model_metric_unavailable: 'La disponivel',
 
   modal_alert_details: 'Detallu Alerta',
   modal_alert_id: 'ID Alerta',

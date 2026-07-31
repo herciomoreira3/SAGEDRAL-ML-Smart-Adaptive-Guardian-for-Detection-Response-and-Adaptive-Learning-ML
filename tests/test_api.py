@@ -8,6 +8,9 @@ from httpx import AsyncClient, ASGITransport
 from sagedral_ml.api.main import create_app
 from sagedral_ml.database.connection import init_db
 from sagedral_ml.auth.security import seed_default_admin
+from sagedral_ml.api.routers.model import _metric
+from sagedral_ml.api.routers import model as model_router
+from sagedral_ml.core.container import global_container
 import sagedral_ml.database.connection as _db_conn
 
 
@@ -114,6 +117,33 @@ async def test_get_model_info_endpoint(client, auth_headers):
     assert res.status_code == 200
     data = res.json()
     assert "anomaly_model" in data
+
+
+def test_model_metric_normalization_preserves_trained_and_rejects_invalid():
+    metadata = {"anomaly_accuracy": 0.91, "anomaly_f1": "0.88", "classifier_accuracy": 2.0}
+    assert _metric(metadata, "anomaly_accuracy") == 0.91
+    assert _metric(metadata, "anomaly_f1") == 0.88
+    assert _metric(metadata, "classifier_accuracy") is None
+    assert _metric({}, "anomaly_accuracy") is None
+
+
+@pytest.mark.asyncio
+async def test_model_info_fallback_metrics_are_returned_and_normalized(monkeypatch):
+    class DummyEngine:
+        model_loaded = True
+        version = "1.0.0-fallback"
+        model_metadata = {
+            "anomaly_accuracy": 0.91,
+            "anomaly_f1": float("nan"),
+            "classifier_accuracy": True,
+        }
+
+    monkeypatch.setattr(global_container, "ml_engine", DummyEngine())
+    data = await model_router.get_model_info(_user=None)
+    assert data["anomaly_model"]["accuracy"] == 0.91
+    assert data["anomaly_model"]["f1_score"] is None
+    assert data["classifier_model"]["accuracy"] is None
+    assert data["anomaly_model"]["note"]
 
 
 @pytest.mark.asyncio
