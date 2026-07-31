@@ -12,7 +12,7 @@ import numpy as np
 import joblib
 from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
 
-from sagedral_ml.detection.ml_engine import FEATURE_NAMES
+from sagedral_ml.detection.ml_engine import FEATURE_NAMES, resolve_model_artifact_dir
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("sagedral_ml.scripts.evaluate")
@@ -33,8 +33,9 @@ def evaluate_models(test_data_path: str, model_dir: str):
     y_test_raw = df[label_col].astype(str)
     y_test_binary = (y_test_raw.str.upper() != "BENIGN") & (y_test_raw.str.upper() != "NORMAL")
 
-    anomaly_path = os.path.join(model_dir, "anomaly_detector.pkl")
-    classifier_path = os.path.join(model_dir, "attack_classifier.pkl")
+    artifact_dir = resolve_model_artifact_dir(model_dir)
+    anomaly_path = os.path.join(artifact_dir, "anomaly_detector.pkl")
+    classifier_path = os.path.join(artifact_dir, "attack_classifier.pkl")
 
     if not os.path.exists(anomaly_path):
         raise FileNotFoundError(f"Anomaly model not found at {anomaly_path}")

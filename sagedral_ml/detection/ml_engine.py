@@ -34,6 +34,28 @@ ATTACK_CLASSES = [
     "NORMAL", "DDoS", "PortScan", "BruteForce",
     "DoS_Slowloris", "WebAttack", "Botnet", "Infiltration", "Exfiltration",
 ]
+ACTIVE_MODEL_MANIFEST = "active_model.json"
+
+
+def resolve_model_artifact_dir(model_dir):
+    """Return pointer-selected artifacts, or the legacy root on absent/bad pointers."""
+    root = os.path.realpath(os.path.abspath(os.path.expanduser(model_dir)))
+    manifest = os.path.join(root, ACTIVE_MODEL_MANIFEST)
+    if not os.path.exists(manifest):
+        return root
+    try:
+        with open(manifest, "r") as handle:
+            payload = json.load(handle)
+        relative = payload.get("artifact_dir") if isinstance(payload, dict) else None
+        if not isinstance(relative, str) or not relative or os.path.isabs(relative):
+            raise ValueError("artifact_dir must be a non-empty relative path")
+        target = os.path.realpath(os.path.abspath(os.path.join(root, relative)))
+        if os.path.commonpath((root, target)) != root or not os.path.isdir(target):
+            raise ValueError("artifact_dir escapes model directory or is missing")
+        return target
+    except Exception as exc:
+        logger.warning("Ignoring invalid model manifest %s: %s; using legacy root", manifest, exc)
+        return root
 
 
 class RuleBasedFallbackModel:
@@ -404,11 +426,12 @@ class MLEngine:
         self.model_profile = {}
         self.model_metadata = {}
         self.version = "1.0.0"
-        anomaly_path = os.path.join(self.model_dir, "anomaly_detector.pkl")
-        classifier_path = os.path.join(self.model_dir, "attack_classifier.pkl")
-        features_path = os.path.join(self.model_dir, "feature_names.json")
-        profile_path = os.path.join(self.model_dir, "model_profile.json")
-        metadata_path = os.path.join(self.model_dir, "model_metadata.json")
+        artifact_dir = resolve_model_artifact_dir(self.model_dir)
+        anomaly_path = os.path.join(artifact_dir, "anomaly_detector.pkl")
+        classifier_path = os.path.join(artifact_dir, "attack_classifier.pkl")
+        features_path = os.path.join(artifact_dir, "feature_names.json")
+        profile_path = os.path.join(artifact_dir, "model_profile.json")
+        metadata_path = os.path.join(artifact_dir, "model_metadata.json")
 
         if not os.path.exists(anomaly_path):
             logger.warning(f"ML anomaly model not found at {anomaly_path}. Generating fallback models...")
@@ -438,7 +461,7 @@ class MLEngine:
             logger.info("Successfully loaded ML detection models.")
             return True
         except Exception as e:
-            logger.error(f"Failed to load ML models from {self.model_dir}: {e}. Attempting fallback models...")
+            logger.error(f"Failed to load ML models from {artifact_dir}: {e}. Attempting fallback models...")
             return self._create_fallback_models()
 
     def _track_drift_row(self, row: List[float]) -> None:

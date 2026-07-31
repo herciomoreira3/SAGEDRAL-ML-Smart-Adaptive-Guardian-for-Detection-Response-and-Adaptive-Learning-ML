@@ -2,7 +2,36 @@
 Basic unit tests for MLEngine fallback behaviour.
 """
 
+import os
+
+import pytest
+
 from sagedral_ml.detection.ml_engine import MLEngine
+from sagedral_ml.detection.ml_engine import resolve_model_artifact_dir
+
+
+def test_model_artifact_resolution_uses_legacy_root_without_pointer(tmp_path):
+    assert resolve_model_artifact_dir(str(tmp_path)) == str(tmp_path)
+
+
+def test_model_artifact_resolution_rejects_traversal_pointer(tmp_path):
+    (tmp_path / "active_model.json").write_text('{"artifact_dir": "../outside"}')
+    assert resolve_model_artifact_dir(str(tmp_path)) == str(tmp_path)
+
+
+def test_model_artifact_resolution_rejects_symlink_escape(tmp_path):
+    outside = tmp_path.parent / (tmp_path.name + "-outside")
+    outside.mkdir()
+    linked = tmp_path / "versions"
+    try:
+        os.symlink(str(outside), str(linked), target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlinks are unavailable")
+    (tmp_path / "active_model.json").write_text(
+        '{"artifact_dir": "versions/model"}'
+    )
+    (outside / "model").mkdir()
+    assert resolve_model_artifact_dir(str(tmp_path)) == str(tmp_path)
 
 
 def test_ml_engine_initializes_without_trained_models(tmp_path):

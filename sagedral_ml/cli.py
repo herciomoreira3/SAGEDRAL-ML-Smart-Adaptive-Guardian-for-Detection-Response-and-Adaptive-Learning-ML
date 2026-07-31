@@ -768,9 +768,15 @@ def model_init(force, model_dir):
                         os.remove(fp)
                     except OSError as e:
                         _cli_warn(f"could not remove {fp}: {e}")
+            pointer = os.path.join(resolved_dir, "active_model.json")
+            if os.path.exists(pointer):
+                try:
+                    os.remove(pointer)
+                except OSError as e:
+                    _cli_warn(f"could not remove {pointer}: {e}")
 
         click.echo(f"Initializing ML models in {resolved_dir} ...")
-        from sagedral_ml.detection.ml_engine import MLEngine
+        from sagedral_ml.detection.ml_engine import MLEngine, resolve_model_artifact_dir
         engine = MLEngine(
             model_dir=resolved_dir,
             anomaly_threshold=anomaly_threshold,
@@ -779,9 +785,10 @@ def model_init(force, model_dir):
         )
 
         if engine.model_loaded:
+            artifact_dir = resolve_model_artifact_dir(resolved_dir)
             _cli_ok(f"[OK] ML models ready. loaded={engine.model_loaded} version={engine.version}")
-            click.echo(f"  anomaly_model.pkl : {os.path.exists(os.path.join(resolved_dir, 'anomaly_detector.pkl'))}")
-            click.echo(f"  attack_classifier : {os.path.exists(os.path.join(resolved_dir, 'attack_classifier.pkl'))}")
+            click.echo(f"  anomaly_model.pkl : {os.path.exists(os.path.join(artifact_dir, 'anomaly_detector.pkl'))}")
+            click.echo(f"  attack_classifier : {os.path.exists(os.path.join(artifact_dir, 'attack_classifier.pkl'))}")
             if "rulebased" in engine.version:
                 _cli_warn("rule-based fallback active. Install lightgbm+scikit-learn for trained models.")
             elif "fallback" in engine.version:
@@ -845,11 +852,12 @@ def model_info():
 
 
 @main.command()
-@click.option("--dataset", "dataset_path", required=True, type=click.Path(exists=True, dir_okay=False), help="Path to input CSV dataset (CICIDS-style)")
+@click.option("--dataset", "dataset_path", required=True, type=click.Path(exists=True, file_okay=True, dir_okay=True), help="CSV file or directory tree containing CICIDS CSV files")
 @click.option("--save-dir", default=None, type=click.Path(file_okay=False), help="Directory to write trained model artifacts (default: ml.model_dir)")
 @click.option("--train-test-split", default=0.2, type=click.FloatRange(0.05, 0.5), help="Validation fraction (0.05-0.5)")
+@click.option("--max-rows-per-class", default=100000, type=int, help="Deterministic per-class cap (0 disables; high RAM)")
 @click.option("--hot-reload", is_flag=True, default=False, help="After training, notify running API to reload models via restart hint")
-def train(dataset_path, save_dir, train_test_split, hot_reload):
+def train(dataset_path, save_dir, train_test_split, hot_reload, max_rows_per_class):
     """Train LightGBM anomaly detector & attack classifier from dataset CSV."""
     try:
         dataset_path = os.path.abspath(dataset_path)
@@ -875,13 +883,16 @@ def train(dataset_path, save_dir, train_test_split, hot_reload):
                 dataset_path=dataset_path,
                 output_dir=save_dir,
                 validation_split=train_test_split,
+                max_rows_per_class=max_rows_per_class,
             )
         except Exception as e:
             _cli_error(f"Training pipeline failed: {e}")
             return
 
+        from sagedral_ml.detection.ml_engine import resolve_model_artifact_dir
+        artifact_dir = resolve_model_artifact_dir(save_dir)
         required_files = ["anomaly_detector.pkl", "attack_classifier.pkl", "feature_names.json"]
-        missing = [f for f in required_files if not os.path.exists(os.path.join(save_dir, f))]
+        missing = [f for f in required_files if not os.path.exists(os.path.join(artifact_dir, f))]
         if missing:
             _cli_warn(f"Training finished but missing expected artifacts: {missing}")
         else:
