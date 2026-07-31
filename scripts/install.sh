@@ -179,8 +179,8 @@ if [ -d /run/systemd/system ] && systemctl is-system-running &>/dev/null; then
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable sagedral-ml 2>/dev/null || true
     info "Systemd service installed and enabled."
-    info "Starting SAGEDRAL-ML service..."
-    systemctl start sagedral-ml 2>/dev/null || warn "Could not auto-start service. Start manually: systemctl start sagedral-ml"
+    info "Restarting SAGEDRAL-ML service to load the installed package and refreshed ML metadata..."
+    systemctl restart sagedral-ml 2>/dev/null || warn "Could not restart service automatically. Start or restart manually: sudo systemctl restart sagedral-ml"
 else
     warn "System is not booted with systemd as PID 1 (WSL or container environment detected)."
     warn "Service file created at /etc/systemd/system/sagedral-ml.service"

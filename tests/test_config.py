@@ -105,3 +105,11 @@ def test_installer_repairs_service_permissions():
     assert "chmod 2770 /etc/sagedral" in installer
     assert "chown root:sagedral /etc/sagedral/config.toml" in installer
     assert "chown -R sagedral:sagedral /var/lib/sagedral-ml" in installer
+
+
+def test_installer_restarts_service_after_systemd_upgrade():
+    root = Path(__file__).resolve().parents[1]
+    installer = (root / "scripts" / "install.sh").read_text(encoding="utf-8")
+
+    assert "systemctl restart sagedral-ml" in installer
+    assert "systemctl start sagedral-ml 2>/dev/null" not in installer
